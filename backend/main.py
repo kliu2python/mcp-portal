@@ -1,6 +1,11 @@
+from __future__ import annotations
+
+import asyncio
 import json
 import os
-from typing import AsyncIterator
+import uuid
+from contextlib import suppress
+from typing import AsyncIterator, Dict
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -14,6 +19,20 @@ from mcp_use import MCPAgent, MCPClient
 load_dotenv()
 
 app = FastAPI(title="MCP Portal Backend")
+
+
+class ManagedTask:
+    """Represents an asynchronously executing MCP task."""
+
+    def __init__(self, prompt: str) -> None:
+        self.prompt = prompt
+        self.queue: asyncio.Queue[str | None] = asyncio.Queue()
+        self.task: asyncio.Task | None = None
+        self.done = asyncio.Event()
+
+
+_tasks: Dict[str, ManagedTask] = {}
+_tasks_lock = asyncio.Lock()
 
 app.add_middleware(
     CORSMiddleware,
@@ -61,22 +80,76 @@ async def run_agent(task: str) -> AsyncIterator[str]:
     yield json.dumps({"type": "result", "message": result})
 
 
+async def _agent_worker(task_id: str, managed_task: ManagedTask) -> None:
+    """Background worker that executes the MCP agent and streams output."""
+
+    try:
+        async for message in run_agent(managed_task.prompt):
+            await managed_task.queue.put(message)
+    except asyncio.CancelledError:
+        await managed_task.queue.put(
+            json.dumps({"type": "cancelled", "message": "Task cancelled."})
+        )
+        raise
+    except Exception as exc:  # pragma: no cover - defensive
+        await managed_task.queue.put(
+            json.dumps({"type": "error", "message": str(exc)})
+        )
+    finally:
+        await managed_task.queue.put(None)
+        managed_task.done.set()
+        async with _tasks_lock:
+            _tasks.pop(task_id, None)
+
+
 @app.post("/run-task")
 async def run_task(request: TaskRequest):
     if not request.task.strip():
         raise HTTPException(status_code=400, detail="Task cannot be empty.")
 
+    task_id = uuid.uuid4().hex
+    managed_task = ManagedTask(prompt=request.task)
+
+    async with _tasks_lock:
+        _tasks[task_id] = managed_task
+
+    managed_task.task = asyncio.create_task(_agent_worker(task_id, managed_task))
+
     async def event_stream() -> AsyncIterator[bytes]:
+        initial_payload = json.dumps({"type": "task", "taskId": task_id})
+        yield f"data: {initial_payload}\n\n".encode("utf-8")
+
         try:
-            async for message in run_agent(request.task):
+            while True:
+                message = await managed_task.queue.get()
+                if message is None:
+                    break
                 yield f"data: {message}\n\n".encode("utf-8")
-        except Exception as exc:
-            error_payload = json.dumps({"type": "error", "message": str(exc)})
-            yield f"data: {error_payload}\n\n".encode("utf-8")
         finally:
             yield b"data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str):
+    async with _tasks_lock:
+        managed_task = _tasks.get(task_id)
+
+    if managed_task is None or managed_task.task is None:
+        raise HTTPException(status_code=404, detail="Task not found or already completed.")
+
+    if managed_task.task.done():
+        return {"status": "completed"}
+
+    managed_task.task.cancel()
+
+    with suppress(asyncio.CancelledError):
+        await managed_task.task
+
+    await managed_task.done.wait()
+
+    return {"status": "cancelled"}
 
 
 @app.get("/health")
