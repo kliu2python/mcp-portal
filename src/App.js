@@ -56,6 +56,8 @@ const MCPPortal = () => {
   const [isMinimized, setIsMinimized] = useState(false);
   const [hasExecuted, setHasExecuted] = useState(false);
   const [isInitialRunActive, setIsInitialRunActive] = useState(false);
+  const [currentTaskId, setCurrentTaskId] = useState(null);
+  const taskAbortControllerRef = useRef(null);
 
   const xpraUrl = useMemo(() => {
     if (!selectedMCP?.baseUrl || !currentSession?.port?.xpra) {
@@ -206,6 +208,10 @@ const MCPPortal = () => {
         case 'error':
           type = 'error';
           break;
+        case 'cancelled':
+          type = 'info';
+          message = message || 'Task cancelled.';
+          break;
         case 'result':
           type = 'success';
           message = `Result: ${message}`;
@@ -237,6 +243,7 @@ const MCPPortal = () => {
       setIsInitialRunActive(true);
       setShowTaskModal(false);
       setIsMinimized(true);
+      setHasExecuted(true);
     }
 
     setIsRunning(true);
@@ -253,12 +260,16 @@ const MCPPortal = () => {
     let streamCompleted = false;
 
     try {
+      setCurrentTaskId(null);
+      taskAbortControllerRef.current = new AbortController();
+
       const response = await fetch(`${API_BASE_URL}/run-task`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ task }),
+        signal: taskAbortControllerRef.current.signal,
       });
 
       if (!response.ok) {
@@ -289,7 +300,22 @@ const MCPPortal = () => {
             streamCompleted = true;
             break;
           }
-          parseAndLogEvent(payload);
+          try {
+            const data = JSON.parse(payload);
+
+            if (data.type === 'task') {
+              setCurrentTaskId(data.taskId || null);
+              if (data.taskId) {
+                const shortId = data.taskId.slice(0, 8);
+                addConsoleLog(`Task started (ID: ${shortId}...)`, 'info');
+              }
+              continue;
+            }
+
+            parseAndLogEvent(payload);
+          } catch (error) {
+            parseAndLogEvent(payload);
+          }
         }
 
         if (streamCompleted) {
@@ -302,27 +328,71 @@ const MCPPortal = () => {
         parseAndLogEvent(JSON.stringify({ type: 'error', message: 'Stream ended unexpectedly.' }));
       }
     } catch (error) {
-      addConsoleLog(`Task execution failed: ${error.message}`, 'error');
+      if (error?.name === 'AbortError') {
+        addConsoleLog('Task execution aborted.', 'info');
+      } else {
+        addConsoleLog(`Task execution failed: ${error.message}`, 'error');
+      }
     } finally {
+      const sessionAlreadyExecuted = Boolean(currentSession?.hasExecuted);
+
       setIsRunning(false);
+      setCurrentTaskId(null);
 
       if (streamCompleted) {
         setShowTaskModal(false);
         setHasExecuted(true);
 
-        // Mark session as having executed tasks
-        currentSession.hasExecuted = true;
-        sessionManager.save();
+        if (currentSession) {
+          currentSession.hasExecuted = true;
+          sessionManager.save();
+        }
 
-        // Auto minimize after 2 seconds
         setTimeout(() => {
           setIsMinimized(true);
         }, 2000);
-      } else if (!hasExecuted) {
+      } else if (!sessionAlreadyExecuted) {
+        setHasExecuted(false);
         setShowTaskModal(true);
       }
 
       setIsInitialRunActive(false);
+
+      if (taskAbortControllerRef.current) {
+        taskAbortControllerRef.current = null;
+      }
+    }
+  };
+
+  const cancelTask = async () => {
+    if (!currentTaskId) {
+      return;
+    }
+
+    if (taskAbortControllerRef.current) {
+      taskAbortControllerRef.current.abort();
+    }
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/tasks/${currentTaskId}/cancel`, {
+        method: 'POST',
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || 'Failed to cancel task');
+      }
+
+      addConsoleLog('Task cancelled.', 'info');
+    } catch (error) {
+      addConsoleLog(`Failed to cancel task: ${error.message}`, 'error');
+    } finally {
+      setIsRunning(false);
+      setIsInitialRunActive(false);
+      setCurrentTaskId(null);
+      if (taskAbortControllerRef.current) {
+        taskAbortControllerRef.current = null;
+      }
     }
   };
 
@@ -613,6 +683,16 @@ const MCPPortal = () => {
                       <Play className="w-4 h-4" />
                       {isRunning ? 'Running...' : 'Execute'}
                     </button>
+                    {isRunning && (
+                      <button
+                        onClick={cancelTask}
+                        disabled={!currentTaskId}
+                        className="w-full mt-2 py-2 bg-red-600 hover:bg-red-700 disabled:bg-slate-700 disabled:cursor-not-allowed rounded-lg flex items-center justify-center gap-2 transition-colors text-sm font-medium"
+                      >
+                        <XCircle className="w-4 h-4" />
+                        Cancel Task
+                      </button>
+                    )}
                   </div>
 
                   {/* Console Output */}
@@ -720,6 +800,16 @@ const MCPPortal = () => {
                   <Play className="w-5 h-5" />
                   {isRunning ? 'Executing...' : 'Execute Task'}
                 </button>
+                {isRunning && (
+                  <button
+                    onClick={cancelTask}
+                    disabled={!currentTaskId}
+                    className="px-6 py-3 bg-red-600 hover:bg-red-700 disabled:bg-slate-700 disabled:cursor-not-allowed rounded-lg transition-colors flex items-center gap-2"
+                  >
+                    <XCircle className="w-5 h-5" />
+                    Cancel Task
+                  </button>
+                )}
                 <button
                   onClick={() => setShowTaskModal(false)}
                   className="px-6 py-3 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
