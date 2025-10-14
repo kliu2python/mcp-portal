@@ -19,6 +19,8 @@ const XpraFrame = React.memo(({ src }) => {
 
 XpraFrame.displayName = 'XpraFrame';
 
+const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:8000';
+
 const MCPPortal = () => {
   const [currentPage, setCurrentPage] = useState('home');
   const [selectedMCP, setSelectedMCP] = useState(null);
@@ -160,6 +162,35 @@ const MCPPortal = () => {
     setConsoleOutput(prev => [...prev, { timestamp, message, type }]);
   };
 
+  const parseAndLogEvent = (payload) => {
+    if (!payload) return;
+
+    try {
+      const data = JSON.parse(payload);
+      let message = data.message || '';
+      let type = 'info';
+
+      switch (data.type) {
+        case 'success':
+          type = 'success';
+          break;
+        case 'error':
+          type = 'error';
+          break;
+        case 'result':
+          type = 'success';
+          message = `Result: ${message}`;
+          break;
+        default:
+          type = 'info';
+      }
+
+      addConsoleLog(message, type);
+    } catch (error) {
+      addConsoleLog(payload, 'info');
+    }
+  };
+
   const runTask = async () => {
     if (!currentSession) {
       addConsoleLog('Please create a session first', 'error');
@@ -182,32 +213,76 @@ const MCPPortal = () => {
       addConsoleLog(`Using MCP server: ${selectedMCP.url}`, 'info');
     }
     
-    // Simulate task execution (replace with actual API call)
-    setTimeout(() => {
-      addConsoleLog('Connecting to MCP server...', 'info');
-      setTimeout(() => {
-        addConsoleLog('MCP tools loaded successfully', 'success');
-        addConsoleLog('Executing task with AI agent...', 'info');
-        setTimeout(() => {
-          addConsoleLog(`Task completed: ${task}`, 'success');
-          if (currentSession.port) {
-            addConsoleLog('Results available in Xpra window', 'info');
+    let streamCompleted = false;
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/run-task`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ task }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || 'Failed to execute task');
+      }
+
+      if (!response.body) {
+        throw new Error('Streaming not supported in this environment');
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop();
+
+        for (const part of parts) {
+          if (!part.startsWith('data:')) continue;
+          const payload = part.replace(/^data:\s*/, '');
+          if (payload === '[DONE]') {
+            streamCompleted = true;
+            break;
           }
-          setIsRunning(false);
-          setShowTaskModal(false);
-          setHasExecuted(true);
-          
-          // Mark session as having executed tasks
-          currentSession.hasExecuted = true;
-          sessionManager.save();
-          
-          // Auto minimize after 2 seconds
-          setTimeout(() => {
-            setIsMinimized(true);
-          }, 2000);
+          parseAndLogEvent(payload);
+        }
+
+        if (streamCompleted) {
+          break;
+        }
+      }
+
+      if (!streamCompleted) {
+        // Handle the case where the stream ended without an explicit [DONE]
+        parseAndLogEvent(JSON.stringify({ type: 'error', message: 'Stream ended unexpectedly.' }));
+      }
+    } catch (error) {
+      addConsoleLog(`Task execution failed: ${error.message}`, 'error');
+    } finally {
+      setIsRunning(false);
+
+      if (streamCompleted) {
+        setShowTaskModal(false);
+        setHasExecuted(true);
+
+        // Mark session as having executed tasks
+        currentSession.hasExecuted = true;
+        sessionManager.save();
+
+        // Auto minimize after 2 seconds
+        setTimeout(() => {
+          setIsMinimized(true);
         }, 2000);
-      }, 1000);
-    }, 500);
+      }
+    }
   };
 
   const uploadCustomMCP = () => {
