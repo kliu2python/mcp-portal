@@ -1,6 +1,23 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Play, Terminal, Monitor, Trash2, Plus, Upload, Server, AlertCircle, CheckCircle, XCircle, Search, Home, Chrome, Database, FolderOpen, Cloud, X, Maximize2, Minimize2 } from 'lucide-react';
 import { SessionManager } from './SessionManager';
+
+const XpraFrame = React.memo(({ src }) => {
+  if (!src) {
+    return null;
+  }
+
+  return (
+    <iframe
+      src={src}
+      className="w-full h-full"
+      title="Xpra Desktop"
+      sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
+    />
+  );
+});
+
+XpraFrame.displayName = 'XpraFrame';
 
 const MCPPortal = () => {
   const [currentPage, setCurrentPage] = useState('home');
@@ -311,6 +328,13 @@ const MCPPortal = () => {
     const sessionLimit = selectedMCP?.sessionLimit;
     const currentSessionCount = sessions.length;
 
+    const xpraUrl = useMemo(() => {
+      if (!selectedMCP?.baseUrl || !currentSession?.port?.xpra) {
+        return '';
+      }
+      return `${selectedMCP.baseUrl}:${currentSession.port.xpra}`;
+    }, [selectedMCP?.baseUrl, currentSession?.port?.xpra, currentSession?.id]);
+
     return (
       <div className="h-screen flex flex-col">
         <div className="mb-6 flex items-center gap-4">
@@ -438,12 +462,7 @@ const MCPPortal = () => {
                   </button>
                 </div>
                 <div className="bg-black rounded-lg overflow-hidden border-2 border-slate-700 flex-1 shadow-2xl">
-                  <iframe
-                    src={`${selectedMCP.baseUrl}:${currentSession.port.xpra}`}
-                    className="w-full h-full"
-                    title="Xpra Desktop"
-                    sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
-                  />
+                  <XpraFrame src={xpraUrl} />
                 </div>
                 <p className="text-xs text-gray-500 mt-2 text-center">
                   Remote desktop environment for browser automation
@@ -527,7 +546,7 @@ const MCPPortal = () => {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white p-6">
-      <div className="max-w-7xl mx-auto h-full">
+      <div className="h-full w-full">
         {currentPage === 'home' && <HomePage />}
         {currentPage === 'workspace' && <WorkspacePage />}
 
