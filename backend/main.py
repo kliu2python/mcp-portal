@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, HttpUrl
 
 from langchain_openai import ChatOpenAI
 from mcp_use import MCPAgent, MCPClient
@@ -39,12 +39,13 @@ LOG_DIR = Path(os.getenv("TASK_LOG_DIR", "task_logs"))
 class ManagedTask:
     """Represents an asynchronously executing MCP task."""
 
-    def __init__(self, prompt: str) -> None:
+    def __init__(self, prompt: str, server_url: str | None) -> None:
         self.prompt = prompt
         self.queue: asyncio.Queue[str | None] = asyncio.Queue()
         self.task: asyncio.Task | None = None
         self.done = asyncio.Event()
         self.status: str = "pending"
+        self.server_url = server_url
 
 
 _tasks: Dict[str, ManagedTask] = {}
@@ -61,6 +62,7 @@ app.add_middleware(
 
 class TaskRequest(BaseModel):
     task: str
+    server_url: HttpUrl | None = None
 
 
 async def _safe_redis_call(coro):
@@ -202,13 +204,17 @@ async def _get_task_log_entries(task_id: str) -> List[Dict[str, object]]:
     return parsed
 
 
-async def run_agent(task: str) -> AsyncIterator[str]:
+async def run_agent(task: str, server_url: str | None) -> AsyncIterator[str]:
     load_dotenv()
+
+    resolved_server_url = server_url or os.getenv(
+        "MCP_SERVER_URL", "http://10.160.13.110:8882/sse"
+    )
 
     config = {
         "mcpServers": {
             "http": {
-                "url": "http://10.160.13.110:8882/sse",
+                "url": resolved_server_url,
             }
         }
     }
@@ -240,7 +246,7 @@ async def _agent_worker(task_id: str, managed_task: ManagedTask) -> None:
 
     managed_task.status = "completed"
     try:
-        async for message in run_agent(managed_task.prompt):
+        async for message in run_agent(managed_task.prompt, managed_task.server_url):
             await _append_task_log(task_id, message)
             await managed_task.queue.put(message)
     except asyncio.CancelledError:
@@ -281,7 +287,11 @@ async def run_task(request: TaskRequest):
         raise HTTPException(status_code=400, detail="Task cannot be empty.")
 
     task_id = uuid.uuid4().hex
-    managed_task = ManagedTask(prompt=request.task)
+    server_url = str(request.server_url) if request.server_url else None
+    if not server_url:
+        raise HTTPException(status_code=400, detail="MCP server URL is required.")
+
+    managed_task = ManagedTask(prompt=request.task, server_url=server_url)
     managed_task.status = "running"
 
     async with _tasks_lock:
