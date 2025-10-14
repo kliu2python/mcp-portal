@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { Play, Terminal, Monitor, Trash2, Plus, Upload, Server, AlertCircle, CheckCircle, XCircle, Search, Home, Chrome, Database, FolderOpen, Cloud, X, Maximize2, Minimize2 } from 'lucide-react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { Play, Terminal, Monitor, Trash2, Plus, Upload, Server, AlertCircle, CheckCircle, XCircle, Search, Home, Chrome, Database, FolderOpen, Cloud, X, Maximize2, Minimize2, Download, Loader2, List } from 'lucide-react';
 import { SessionManager } from './SessionManager';
 
 const XpraFrame = React.memo(({ src }) => {
@@ -57,6 +57,14 @@ const MCPPortal = () => {
   const [hasExecuted, setHasExecuted] = useState(false);
   const [isInitialRunActive, setIsInitialRunActive] = useState(false);
   const [currentTaskId, setCurrentTaskId] = useState(null);
+  const [taskSummary, setTaskSummary] = useState({ active: [], completed: [], cancelled: [], failed: [] });
+  const [selectedTaskId, setSelectedTaskId] = useState(null);
+  const [selectedTaskDetails, setSelectedTaskDetails] = useState(null);
+  const [taskLogEntries, setTaskLogEntries] = useState([]);
+  const [isFetchingTasks, setIsFetchingTasks] = useState(false);
+  const [tasksError, setTasksError] = useState(null);
+  const [isLoadingTaskLog, setIsLoadingTaskLog] = useState(false);
+  const [taskPanelFilter, setTaskPanelFilter] = useState('active');
   const taskAbortControllerRef = useRef(null);
 
   const xpraUrl = useMemo(() => {
@@ -64,7 +72,7 @@ const MCPPortal = () => {
       return '';
     }
     return `${selectedMCP.baseUrl}:${currentSession.port.xpra}`;
-  }, [selectedMCP?.baseUrl, currentSession?.port?.xpra, currentSession?.id]);
+  }, [selectedMCP?.baseUrl, currentSession?.port?.xpra]);
 
   const [mcpServers] = useState([
     {
@@ -131,17 +139,81 @@ const MCPPortal = () => {
     }
   ]);
 
-  useEffect(() => {
-    if (selectedMCP) {
-      refreshSessions();
-    }
-  }, [selectedMCP]);
-
-  const refreshSessions = () => {
+  const refreshSessions = useCallback(() => {
     if (selectedMCP) {
       setSessions(sessionManager.getSessions(selectedMCP.id));
     }
-  };
+  }, [selectedMCP, sessionManager]);
+
+  useEffect(() => {
+    refreshSessions();
+  }, [refreshSessions]);
+
+  useEffect(() => {
+    let isMounted = true;
+    let pollTimer = null;
+
+    const fetchTasks = async () => {
+      try {
+        if (!isMounted) return;
+        setIsFetchingTasks(true);
+        const response = await fetch(`${API_BASE_URL}/tasks`);
+        if (!response.ok) {
+          const message = await response.text();
+          throw new Error(message || 'Failed to load tasks');
+        }
+
+        const data = await response.json();
+        if (!isMounted) return;
+        setTaskSummary({
+          active: data.active || [],
+          completed: data.completed || [],
+          cancelled: data.cancelled || [],
+          failed: data.failed || [],
+        });
+        setTasksError(null);
+      } catch (error) {
+        if (isMounted) {
+          setTasksError(error.message);
+        }
+      } finally {
+        if (isMounted) {
+          setIsFetchingTasks(false);
+        }
+      }
+    };
+
+    fetchTasks();
+    pollTimer = setInterval(fetchTasks, 5000);
+
+    return () => {
+      isMounted = false;
+      if (pollTimer) {
+        clearInterval(pollTimer);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!selectedTaskId) {
+      return;
+    }
+
+    const allTasks = [
+      ...taskSummary.active,
+      ...taskSummary.completed,
+      ...taskSummary.cancelled,
+      ...taskSummary.failed,
+    ];
+
+    const updated = allTasks.find((task) => task.task_id === selectedTaskId);
+    if (updated) {
+      setSelectedTaskDetails((prev) => ({
+        ...updated,
+        log_length: prev?.log_length ?? updated.log_length,
+      }));
+    }
+  }, [taskSummary, selectedTaskId]);
 
   const createNewSession = () => {
     try {
@@ -192,6 +264,78 @@ const MCPPortal = () => {
     const timestamp = new Date().toLocaleTimeString();
     setConsoleOutput(prev => [...prev, { timestamp, message, type }]);
   };
+
+  const loadTaskLog = async (taskId) => {
+    if (!taskId) return;
+    setIsLoadingTaskLog(true);
+    setSelectedTaskId(taskId);
+    setTaskLogEntries([]);
+    setSelectedTaskDetails(null);
+    try {
+      const [metadataResponse, logResponse] = await Promise.all([
+        fetch(`${API_BASE_URL}/tasks/${taskId}`),
+        fetch(`${API_BASE_URL}/tasks/${taskId}/log`)
+      ]);
+
+      if (!metadataResponse.ok) {
+        const message = await metadataResponse.text();
+        throw new Error(message || 'Unable to load task metadata');
+      }
+
+      if (!logResponse.ok) {
+        const message = await logResponse.text();
+        throw new Error(message || 'Unable to load task log');
+      }
+
+      const metadata = await metadataResponse.json();
+      const logData = await logResponse.json();
+
+      setSelectedTaskDetails(metadata);
+      setTaskLogEntries(logData.entries || []);
+    } catch (error) {
+      addConsoleLog(`Failed to load task log: ${error.message}`, 'error');
+    } finally {
+      setIsLoadingTaskLog(false);
+    }
+  };
+
+  const downloadTaskLog = (taskId) => {
+    if (!taskId) return;
+    const url = `${API_BASE_URL}/tasks/${taskId}/log/download`;
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
+  const getTaskStatusColor = (status) => {
+    switch (status) {
+      case 'completed':
+        return 'text-green-400 border-green-500/40 bg-green-500/10';
+      case 'failed':
+        return 'text-red-400 border-red-500/40 bg-red-500/10';
+      case 'cancelled':
+        return 'text-amber-300 border-amber-500/40 bg-amber-500/10';
+      case 'running':
+        return 'text-blue-300 border-blue-500/40 bg-blue-500/10';
+      default:
+        return 'text-slate-300 border-slate-500/40 bg-slate-500/10';
+    }
+  };
+
+  const formatTimestamp = (value) => {
+    if (!value) return '—';
+    try {
+      return new Date(value).toLocaleString();
+    } catch (error) {
+      return value;
+    }
+  };
+
+  const visibleTasks = taskSummary[taskPanelFilter] || [];
+  const taskFilters = useMemo(() => ([
+    { id: 'active', label: 'Active', count: taskSummary.active.length },
+    { id: 'completed', label: 'Completed', count: taskSummary.completed.length },
+    { id: 'cancelled', label: 'Cancelled', count: taskSummary.cancelled.length },
+    { id: 'failed', label: 'Failed', count: taskSummary.failed.length },
+  ]), [taskSummary]);
 
   const parseAndLogEvent = (payload) => {
     if (!payload) return;
@@ -398,7 +542,7 @@ const MCPPortal = () => {
 
   const uploadCustomMCP = () => {
     try {
-      const config = JSON.parse(customMCPConfig);
+      JSON.parse(customMCPConfig);
       addConsoleLog('Custom MCP uploaded successfully', 'success');
       setCustomMCPConfig('');
       setShowUploadModal(false);
@@ -718,8 +862,8 @@ const MCPPortal = () => {
                             <div className="flex-shrink-0 mt-0.5">{getConsoleIcon(log.type)}</div>
                             <span className="text-gray-500 flex-shrink-0">[{log.timestamp}]</span>
                             <span className={`flex-1 break-words ${
-                              log.type === 'error' ? 'text-red-400' : 
-                              log.type === 'success' ? 'text-green-400' : 
+                              log.type === 'error' ? 'text-red-400' :
+                              log.type === 'success' ? 'text-green-400' :
                               'text-gray-300'
                             }`}>
                               {log.message}
@@ -728,6 +872,136 @@ const MCPPortal = () => {
                         ))
                       )}
                     </div>
+                  </div>
+
+                  {/* Task Activity */}
+                  <div className="bg-slate-800/80 backdrop-blur rounded-lg p-4 border border-purple-500/20 flex flex-col shadow-lg">
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="text-sm font-semibold flex items-center gap-2">
+                        <List className="w-4 h-4 text-purple-400" />
+                        Task Activity
+                      </h3>
+                      {isFetchingTasks ? (
+                        <Loader2 className="w-4 h-4 text-purple-300 animate-spin" />
+                      ) : null}
+                    </div>
+
+                    <div className="flex flex-wrap gap-2 mb-3">
+                      {taskFilters.map((filter) => (
+                        <button
+                          key={filter.id}
+                          onClick={() => setTaskPanelFilter(filter.id)}
+                          className={`text-xs px-3 py-1.5 rounded-full border transition-colors ${
+                            taskPanelFilter === filter.id
+                              ? 'bg-purple-600 border-purple-400 text-white'
+                              : 'bg-slate-900 border-slate-700 text-gray-300 hover:border-purple-400 hover:text-purple-200'
+                          }`}
+                        >
+                          <span className="font-medium">{filter.label}</span>
+                          <span className="ml-2 inline-flex items-center justify-center min-w-[1.5rem] px-1 py-0.5 bg-black/50 rounded-full text-[10px]">
+                            {filter.count}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="bg-slate-900 rounded-lg border border-slate-700 max-h-52 overflow-y-auto divide-y divide-slate-800">
+                      {tasksError ? (
+                        <div className="text-red-400 text-xs p-3">{tasksError}</div>
+                      ) : visibleTasks.length === 0 ? (
+                        <div className="text-gray-500 text-xs p-4 text-center">No tasks to display.</div>
+                      ) : (
+                        visibleTasks.map((task) => (
+                          <button
+                            key={task.task_id}
+                            onClick={() => loadTaskLog(task.task_id)}
+                            className={`w-full text-left px-3 py-2 text-xs transition-colors ${
+                              selectedTaskId === task.task_id ? 'bg-purple-500/20' : 'hover:bg-slate-800'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between mb-1 gap-2">
+                              <div className="font-semibold text-slate-100 truncate">{task.prompt || 'Untitled task'}</div>
+                              <span className={`px-2 py-0.5 rounded-full border text-[10px] uppercase tracking-wide ${getTaskStatusColor(task.status)}`}>
+                                {task.status || 'unknown'}
+                              </span>
+                            </div>
+                            <div className="text-[10px] text-gray-400 flex items-center justify-between">
+                              <span>ID: {task.task_id.slice(0, 8)}...</span>
+                              <span>{formatTimestamp(task.updated_at || task.created_at)}</span>
+                            </div>
+                          </button>
+                        ))
+                      )}
+                    </div>
+
+                    {selectedTaskId && (
+                      <div className="mt-3 bg-slate-900 rounded-lg border border-slate-700 p-3">
+                        <div className="flex items-center justify-between gap-2 mb-2">
+                          <div>
+                            <div className="text-xs font-semibold text-purple-200">Task {selectedTaskId.slice(0, 8)}...</div>
+                            <div className="text-[10px] text-gray-400">{selectedTaskDetails?.prompt || 'No prompt available'}</div>
+                          </div>
+                          <button
+                            onClick={() => downloadTaskLog(selectedTaskId)}
+                            className="flex items-center gap-1 text-xs px-3 py-1 bg-purple-600 hover:bg-purple-700 rounded-full transition-colors"
+                          >
+                            <Download className="w-3 h-3" />
+                            Download
+                          </button>
+                        </div>
+                        <div className="text-[10px] text-gray-400 mb-2 flex flex-wrap gap-3">
+                          <span>Created: {formatTimestamp(selectedTaskDetails?.created_at)}</span>
+                          <span>Updated: {formatTimestamp(selectedTaskDetails?.updated_at)}</span>
+                          <span>Status: {selectedTaskDetails?.status}</span>
+                        </div>
+                        <div className="bg-black/60 rounded p-2 max-h-40 overflow-y-auto space-y-1 font-mono">
+                          {isLoadingTaskLog ? (
+                            <div className="flex items-center justify-center gap-2 text-purple-200 py-4">
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                              Loading log...
+                            </div>
+                          ) : taskLogEntries.length === 0 ? (
+                            <div className="text-gray-500 text-center py-2">No log entries available.</div>
+                          ) : (
+                            taskLogEntries.map((entry, idx) => {
+                              const payload = entry.payload;
+                              let message = '';
+                              let type = undefined;
+
+                              if (typeof payload === 'string') {
+                                message = payload;
+                              } else if (payload && typeof payload === 'object') {
+                                type = payload.type;
+                                if (typeof payload.message === 'string') {
+                                  message = payload.message;
+                                } else if (payload.message) {
+                                  message = JSON.stringify(payload.message);
+                                } else {
+                                  message = JSON.stringify(payload);
+                                }
+                              } else if (payload !== undefined && payload !== null) {
+                                message = String(payload);
+                              } else {
+                                message = JSON.stringify(entry);
+                              }
+
+                              return (
+                                <div key={idx} className="flex items-start gap-2">
+                                  <span className="text-gray-500 flex-shrink-0">[{entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : '--'}]</span>
+                                  <span className={`flex-1 break-words ${
+                                    type === 'error' ? 'text-red-400' :
+                                    type === 'success' ? 'text-green-400' :
+                                    'text-gray-300'
+                                  }`}>
+                                    {message}
+                                  </span>
+                                </div>
+                              );
+                            })
+                          )}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </>
               )}

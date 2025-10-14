@@ -5,20 +5,35 @@ import json
 import os
 import uuid
 from contextlib import suppress
-from typing import AsyncIterator, Dict
+from datetime import datetime
+from pathlib import Path
+from typing import AsyncIterator, Dict, List
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from langchain_openai import ChatOpenAI
 from mcp_use import MCPAgent, MCPClient
 
+import redis.asyncio as redis
+from redis.exceptions import RedisError
+
 load_dotenv()
 
 app = FastAPI(title="MCP Portal Backend")
+
+
+def _get_redis_client() -> "redis.Redis":
+    redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
+    return redis.from_url(redis_url, encoding="utf-8", decode_responses=True)
+
+
+redis_client = _get_redis_client()
+
+LOG_DIR = Path(os.getenv("TASK_LOG_DIR", "task_logs"))
 
 
 class ManagedTask:
@@ -29,6 +44,7 @@ class ManagedTask:
         self.queue: asyncio.Queue[str | None] = asyncio.Queue()
         self.task: asyncio.Task | None = None
         self.done = asyncio.Event()
+        self.status: str = "pending"
 
 
 _tasks: Dict[str, ManagedTask] = {}
@@ -45,6 +61,145 @@ app.add_middleware(
 
 class TaskRequest(BaseModel):
     task: str
+
+
+async def _safe_redis_call(coro):
+    try:
+        return await coro
+    except RedisError as exc:  # pragma: no cover - defensive
+        raise RuntimeError(f"Redis operation failed: {exc}") from exc
+
+
+async def _register_task(task_id: str, prompt: str) -> None:
+    timestamp = datetime.utcnow().isoformat()
+    await _safe_redis_call(
+        redis_client.hset(
+            f"task:{task_id}",
+            mapping={
+                "prompt": prompt,
+                "status": "running",
+                "created_at": timestamp,
+                "updated_at": timestamp,
+            },
+        )
+    )
+    await _safe_redis_call(redis_client.sadd("tasks:all", task_id))
+    await _safe_redis_call(redis_client.sadd("tasks:active", task_id))
+
+
+async def _append_task_log(task_id: str, payload: str) -> None:
+    entry = json.dumps({"timestamp": datetime.utcnow().isoformat(), "payload": payload})
+    await _safe_redis_call(redis_client.rpush(f"task:{task_id}:log", entry))
+    await _safe_redis_call(
+        redis_client.hset(
+            f"task:{task_id}",
+            mapping={"updated_at": datetime.utcnow().isoformat()},
+        )
+    )
+
+
+async def _finalize_task(task_id: str, status: str) -> None:
+    timestamp = datetime.utcnow().isoformat()
+    await _safe_redis_call(redis_client.srem("tasks:active", task_id))
+    await _safe_redis_call(redis_client.srem("tasks:completed", task_id))
+    await _safe_redis_call(redis_client.srem("tasks:failed", task_id))
+    await _safe_redis_call(redis_client.srem("tasks:cancelled", task_id))
+    await _safe_redis_call(redis_client.sadd(f"tasks:{status}", task_id))
+    await _safe_redis_call(
+        redis_client.hset(
+            f"task:{task_id}",
+            mapping={"status": status, "completed_at": timestamp, "updated_at": timestamp},
+        )
+    )
+
+
+async def _get_task_metadata(task_id: str) -> Dict[str, str]:
+    data = await _safe_redis_call(redis_client.hgetall(f"task:{task_id}"))
+    if not data:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    data["task_id"] = task_id
+    return data
+
+
+async def _ensure_log_directory() -> None:
+    await asyncio.to_thread(LOG_DIR.mkdir, parents=True, exist_ok=True)
+
+
+async def _persist_log_file(task_id: str) -> Path:
+    await _ensure_log_directory()
+    entries: List[str] = await _safe_redis_call(redis_client.lrange(f"task:{task_id}:log", 0, -1))
+    if not entries:
+        raise HTTPException(status_code=404, detail="No log entries for this task.")
+
+    log_path = LOG_DIR / f"{task_id}.txt"
+
+    def _write_file() -> None:
+        with log_path.open("w", encoding="utf-8") as file:
+            for entry in entries:
+                try:
+                    payload = json.loads(entry)
+                except json.JSONDecodeError:
+                    file.write(f"{entry}\n")
+                    continue
+
+                timestamp = payload.get("timestamp", "")
+                message = payload.get("payload", "")
+                file.write(f"[{timestamp}] {message}\n")
+
+    await asyncio.to_thread(_write_file)
+
+    await _safe_redis_call(
+        redis_client.hset(
+            f"task:{task_id}",
+            mapping={"log_file": str(log_path)},
+        )
+    )
+
+    return log_path
+
+
+async def _get_or_create_log_file(task_id: str) -> Path:
+    metadata = await _get_task_metadata(task_id)
+    existing = metadata.get("log_file")
+    if existing:
+        path = Path(existing)
+        if path.exists():
+            return path
+    return await _persist_log_file(task_id)
+
+
+async def _fetch_task_list(set_name: str) -> List[Dict[str, str]]:
+    task_ids = await _safe_redis_call(redis_client.smembers(set_name))
+    results: List[Dict[str, str]] = []
+    for task_id in task_ids:
+        try:
+            results.append(await _get_task_metadata(task_id))
+        except HTTPException:
+            continue
+    results.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+    return results
+
+
+async def _get_task_log_entries(task_id: str) -> List[Dict[str, object]]:
+    entries = await _safe_redis_call(redis_client.lrange(f"task:{task_id}:log", 0, -1))
+    parsed: List[Dict[str, object]] = []
+    for entry in entries:
+        try:
+            payload = json.loads(entry)
+        except json.JSONDecodeError:
+            parsed.append({"timestamp": None, "payload": entry})
+            continue
+
+        timestamp = payload.get("timestamp")
+        raw_message = payload.get("payload")
+        try:
+            decoded = json.loads(raw_message) if isinstance(raw_message, str) else raw_message
+        except json.JSONDecodeError:
+            decoded = raw_message
+
+        parsed.append({"timestamp": timestamp, "payload": decoded})
+
+    return parsed
 
 
 async def run_agent(task: str) -> AsyncIterator[str]:
@@ -83,21 +238,39 @@ async def run_agent(task: str) -> AsyncIterator[str]:
 async def _agent_worker(task_id: str, managed_task: ManagedTask) -> None:
     """Background worker that executes the MCP agent and streams output."""
 
+    managed_task.status = "completed"
     try:
         async for message in run_agent(managed_task.prompt):
+            await _append_task_log(task_id, message)
             await managed_task.queue.put(message)
     except asyncio.CancelledError:
+        managed_task.status = "cancelled"
         await managed_task.queue.put(
             json.dumps({"type": "cancelled", "message": "Task cancelled."})
         )
+        await _append_task_log(
+            task_id, json.dumps({"type": "cancelled", "message": "Task cancelled."})
+        )
         raise
     except Exception as exc:  # pragma: no cover - defensive
+        managed_task.status = "failed"
         await managed_task.queue.put(
             json.dumps({"type": "error", "message": str(exc)})
         )
+        await _append_task_log(task_id, json.dumps({"type": "error", "message": str(exc)}))
     finally:
         await managed_task.queue.put(None)
         managed_task.done.set()
+        try:
+            await _finalize_task(task_id, managed_task.status)
+        except Exception as exc:  # pragma: no cover - defensive
+            await managed_task.queue.put(
+                json.dumps({"type": "error", "message": f"Failed to finalize task: {exc}"})
+            )
+        else:
+            if managed_task.status in {"completed", "failed", "cancelled"}:
+                with suppress(Exception):  # pragma: no cover - defensive
+                    await _persist_log_file(task_id)
         async with _tasks_lock:
             _tasks.pop(task_id, None)
 
@@ -109,14 +282,24 @@ async def run_task(request: TaskRequest):
 
     task_id = uuid.uuid4().hex
     managed_task = ManagedTask(prompt=request.task)
+    managed_task.status = "running"
 
     async with _tasks_lock:
         _tasks[task_id] = managed_task
+
+    try:
+        await _register_task(task_id, request.task)
+    except RuntimeError as exc:
+        async with _tasks_lock:
+            _tasks.pop(task_id, None)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     managed_task.task = asyncio.create_task(_agent_worker(task_id, managed_task))
 
     async def event_stream() -> AsyncIterator[bytes]:
         initial_payload = json.dumps({"type": "task", "taskId": task_id})
+        with suppress(Exception):  # pragma: no cover - defensive
+            await _append_task_log(task_id, initial_payload)
         yield f"data: {initial_payload}\n\n".encode("utf-8")
 
         try:
@@ -150,6 +333,72 @@ async def cancel_task(task_id: str):
     await managed_task.done.wait()
 
     return {"status": "cancelled"}
+
+
+@app.get("/tasks")
+async def list_tasks():
+    try:
+        active = await _fetch_task_list("tasks:active")
+        completed = await _fetch_task_list("tasks:completed")
+        cancelled = await _fetch_task_list("tasks:cancelled")
+        failed = await _fetch_task_list("tasks:failed")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return {
+        "active": active,
+        "completed": completed,
+        "cancelled": cancelled,
+        "failed": failed,
+    }
+
+
+@app.get("/tasks/{task_id}")
+async def get_task(task_id: str):
+    try:
+        metadata = await _get_task_metadata(task_id)
+        log_length = await _safe_redis_call(redis_client.llen(f"task:{task_id}:log"))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    metadata["log_length"] = log_length
+    return metadata
+
+
+@app.get("/tasks/{task_id}/log")
+async def get_task_log(task_id: str):
+    # Ensure the task exists first
+    try:
+        await _get_task_metadata(task_id)
+        entries = await _get_task_log_entries(task_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return {"task_id": task_id, "entries": entries}
+
+
+@app.post("/tasks/{task_id}/log/persist")
+async def persist_task_log(task_id: str):
+    try:
+        path = await _persist_log_file(task_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return {"task_id": task_id, "log_file": str(path)}
+
+
+@app.get("/tasks/{task_id}/log/download")
+async def download_task_log(task_id: str):
+    try:
+        log_path = await _get_or_create_log_file(task_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    if not log_path.exists():  # pragma: no cover - defensive
+        raise HTTPException(status_code=404, detail="Log file not found.")
+
+    filename = f"task-{task_id}.txt"
+    return FileResponse(log_path, media_type="text/plain", filename=filename)
 
 
 @app.get("/health")
