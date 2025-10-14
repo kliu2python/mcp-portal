@@ -1,15 +1,34 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Play, Terminal, Monitor, Trash2, Plus, Upload, Server, AlertCircle, CheckCircle, XCircle, Search, Home, Chrome, Database, FolderOpen, Cloud, X, Maximize2, Minimize2 } from 'lucide-react';
 import { SessionManager } from './SessionManager';
 
 const XpraFrame = React.memo(({ src }) => {
+  const iframeRef = useRef(null);
+  const lastSrcRef = useRef(null);
+
+  useEffect(() => {
+    if (!iframeRef.current) {
+      return;
+    }
+
+    if (src) {
+      if (src !== lastSrcRef.current) {
+        iframeRef.current.src = src;
+        lastSrcRef.current = src;
+      }
+    } else if (lastSrcRef.current) {
+      iframeRef.current.src = 'about:blank';
+      lastSrcRef.current = null;
+    }
+  }, [src]);
+
   if (!src) {
     return null;
   }
 
   return (
     <iframe
-      src={src}
+      ref={iframeRef}
       className="w-full h-full"
       title="Xpra Desktop"
       sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
@@ -36,6 +55,13 @@ const MCPPortal = () => {
   const [showTaskModal, setShowTaskModal] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
   const [hasExecuted, setHasExecuted] = useState(false);
+
+  const xpraUrl = useMemo(() => {
+    if (!selectedMCP?.baseUrl || !currentSession?.port?.xpra) {
+      return '';
+    }
+    return `${selectedMCP.baseUrl}:${currentSession.port.xpra}`;
+  }, [selectedMCP?.baseUrl, currentSession?.port?.xpra, currentSession?.id]);
 
   const [mcpServers] = useState([
     {
@@ -319,7 +345,7 @@ const MCPPortal = () => {
   }, {});
 
   // Home Page - MCP Browser
-  const HomePage = () => (
+  const renderHomePage = () => (
     <div>
       <div className="mb-8">
         <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
@@ -398,17 +424,14 @@ const MCPPortal = () => {
   );
 
   // Workspace Page
-  const WorkspacePage = () => {
+  const renderWorkspacePage = () => {
+    if (!selectedMCP) {
+      return null;
+    }
+
     const Icon = selectedMCP?.icon || Server;
     const sessionLimit = selectedMCP?.sessionLimit;
     const currentSessionCount = sessions.length;
-
-    const xpraUrl = useMemo(() => {
-      if (!selectedMCP?.baseUrl || !currentSession?.port?.xpra) {
-        return '';
-      }
-      return `${selectedMCP.baseUrl}:${currentSession.port.xpra}`;
-    }, [selectedMCP?.baseUrl, currentSession?.port?.xpra, currentSession?.id]);
 
     return (
       <div className="h-screen flex flex-col">
@@ -622,8 +645,8 @@ const MCPPortal = () => {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white p-6">
       <div className="h-full w-full">
-        {currentPage === 'home' && <HomePage />}
-        {currentPage === 'workspace' && <WorkspacePage />}
+        {currentPage === 'home' && renderHomePage()}
+        {currentPage === 'workspace' && renderWorkspacePage()}
 
         {/* Task Input Modal */}
         {showTaskModal && currentSession && (
