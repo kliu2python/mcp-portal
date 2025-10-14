@@ -55,6 +55,7 @@ const MCPPortal = () => {
   const [showTaskModal, setShowTaskModal] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
   const [hasExecuted, setHasExecuted] = useState(false);
+  const [isInitialRunActive, setIsInitialRunActive] = useState(false);
 
   const xpraUrl = useMemo(() => {
     if (!selectedMCP?.baseUrl || !currentSession?.port?.xpra) {
@@ -160,6 +161,7 @@ const MCPPortal = () => {
       setCurrentSession(null);
       setHasExecuted(false);
       setIsMinimized(false);
+      setIsInitialRunActive(false);
     }
     refreshSessions();
     addConsoleLog('Session released', 'info');
@@ -180,6 +182,7 @@ const MCPPortal = () => {
       setIsMinimized(false);
       setTask('');
       setConsoleOutput([]);
+      setIsInitialRunActive(false);
     }
   };
 
@@ -228,9 +231,17 @@ const MCPPortal = () => {
       return;
     }
 
+    const hasXpraPort = Boolean(currentSession?.port?.xpra);
+
+    if (!hasExecuted && !isInitialRunActive && hasXpraPort) {
+      setIsInitialRunActive(true);
+      setShowTaskModal(false);
+      setIsMinimized(true);
+    }
+
     setIsRunning(true);
     sessionManager.updateActivity(selectedMCP.id, currentSession.id);
-    
+
     addConsoleLog(`Starting task: ${task}`, 'info');
     
     if (currentSession.port) {
@@ -307,7 +318,11 @@ const MCPPortal = () => {
         setTimeout(() => {
           setIsMinimized(true);
         }, 2000);
+      } else if (!hasExecuted) {
+        setShowTaskModal(true);
       }
+
+      setIsInitialRunActive(false);
     }
   };
 
@@ -391,6 +406,7 @@ const MCPPortal = () => {
                       setTask('');
                       setHasExecuted(false);
                       setIsMinimized(false);
+                      setIsInitialRunActive(false);
                     }}
                     className="bg-slate-800 rounded-lg p-6 border border-slate-700 hover:border-purple-500 cursor-pointer transition-all hover:transform hover:scale-105 group"
                   >
@@ -541,7 +557,7 @@ const MCPPortal = () => {
         )}
 
         {/* Main Content Area */}
-        {currentSession && currentSession.port && hasExecuted && (
+        {currentSession && currentSession.port && (hasExecuted || isInitialRunActive) && (
           <div className="flex-1 flex gap-4 min-h-0">
             {/* Xpra Window */}
             <div className={`transition-all duration-700 ease-in-out ${isMinimized ? 'flex-1' : 'flex-1'} flex flex-col`}>
