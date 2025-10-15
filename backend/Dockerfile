@@ -9,6 +9,9 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    libjpeg62-turbo-dev \
+    zlib1g-dev \
+    libfreetype6-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt
@@ -17,10 +20,13 @@ RUN pip install --upgrade pip \
 
 COPY . /app
 
-ENV TASK_LOG_DIR=/app/task_logs \
+ENV REPORT_ROOT=/app/reports \
+    DATABASE_URL=sqlite:////app/data/automation.db \
+    DEFAULT_EXECUTOR=automation-bot \
+    STEP_DELAY_SECONDS=0.6 \
     PORT=8000
 
-RUN mkdir -p ${TASK_LOG_DIR}
+RUN mkdir -p ${REPORT_ROOT} /app/data
 
 EXPOSE 8000
 

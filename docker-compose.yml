@@ -1,30 +1,20 @@
 version: '3.9'
 
 services:
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     environment:
-      REDIS_URL: redis://redis:6379/0
-      TASK_LOG_DIR: /app/task_logs
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-changeme}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////app/data/automation.db}
+      REPORT_ROOT: /app/reports
+      DEFAULT_EXECUTOR: ${DEFAULT_EXECUTOR:-automation-bot}
+      STEP_DELAY_SECONDS: ${STEP_DELAY_SECONDS:-0.6}
+    volumes:
+      - backend-data:/app/data
+      - backend-reports:/app/reports
     ports:
       - "8000:8000"
-    volumes:
-      - backend-logs:/app/task_logs
-    depends_on:
-      - redis
 
   frontend:
     build:
@@ -38,5 +28,5 @@ services:
       - backend
 
 volumes:
-  redis-data:
-  backend-logs:
+  backend-data:
+  backend-reports:
