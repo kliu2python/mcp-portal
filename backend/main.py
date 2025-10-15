@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field as PydanticField, field_validator
-from sqlalchemy import Column, case, func
+from sqlalchemy import Column, case, func, inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.types import JSON
 from sqlmodel import Field, Session, SQLModel, create_engine, select
@@ -29,6 +29,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./automation.db")
 REPORT_ROOT = Path(os.getenv("REPORT_ROOT", "reports"))
 SCREENSHOT_DIR = REPORT_ROOT / "screenshots"
 DEFAULT_EXECUTOR = os.getenv("DEFAULT_EXECUTOR", "automation-bot")
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4.1-mini"
 STEP_DELAY_SECONDS = float(os.getenv("STEP_DELAY_SECONDS", "0.6"))
 ALLOWED_PRIORITIES = {"critical", "high", "medium", "low"}
 ALLOWED_STATUSES = {"draft", "ready", "in-review", "deprecated", "archived"}
@@ -110,6 +111,16 @@ def _generate_steps_from_prompt(prompt: str) -> List[Dict[str, Any]]:
 def _ensure_report_directories() -> None:
     REPORT_ROOT.mkdir(parents=True, exist_ok=True)
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _ensure_database_schema() -> None:
+    SQLModel.metadata.create_all(engine)
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        columns = {column["name"] for column in inspector.get_columns("testexecution")}
+        if "model" not in columns:
+            connection.execute(text("ALTER TABLE testexecution ADD COLUMN model VARCHAR"))
+            connection.commit()
 
 
 def _create_placeholder_screenshot(execution_id: int, step_index: int, description: str, status_value: str) -> str:
@@ -216,6 +227,7 @@ class TestExecutionBase(SQLModel):
     category: Optional[str] = None
     priority: Optional[str] = None
     tags: List[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    model: str = Field(default=DEFAULT_MODEL)
     total_steps: int = 0
     passed_steps: int = 0
     failed_steps: int = 0
@@ -250,6 +262,7 @@ class ExecutionStartRequest(BaseModel):
     priority: Optional[str] = None
     category: Optional[str] = None
     name: Optional[str] = None
+    model: Optional[str] = None
 
     @field_validator("tags", mode="before")
     @classmethod
@@ -266,16 +279,33 @@ class ExecutionStartRequest(BaseModel):
     def _clean_category(cls, value: Optional[str]) -> Optional[str]:
         return value.strip() if isinstance(value, str) else value
 
+    @field_validator("model")
+    @classmethod
+    def _clean_model(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
 
 class BatchExecutionRequest(BaseModel):
     test_case_ids: List[int]
     requested_by: Optional[str] = None
     tags: List[str] = PydanticField(default_factory=list)
+    model: Optional[str] = None
 
     @field_validator("tags", mode="before")
     @classmethod
     def _clean_tags(cls, value: Iterable[str]) -> List[str]:
         return _normalize_tags(value)
+
+    @field_validator("model")
+    @classmethod
+    def _clean_model(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
 
 
 class BulkUpdateRequest(BaseModel):
@@ -325,6 +355,7 @@ class TestExecutionRead(BaseModel):
     category: Optional[str]
     priority: Optional[str]
     tags: List[str]
+    model: str
     total_steps: int
     passed_steps: int
     failed_steps: int
@@ -365,9 +396,9 @@ class BreakdownPoint(BaseModel):
 
 
 @asynccontextmanager
-def lifespan(_: FastAPI) -> AsyncIterator[None]:
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     _ensure_report_directories()
-    SQLModel.metadata.create_all(engine)
+    _ensure_database_schema()
     yield
 
 
@@ -611,6 +642,7 @@ def _serialize_execution(session: Session, execution: TestExecution, include_ste
         category=execution.category,
         priority=execution.priority,
         tags=execution.tags,
+        model=execution.model or DEFAULT_MODEL,
         total_steps=execution.total_steps,
         passed_steps=execution.passed_steps,
         failed_steps=execution.failed_steps,
@@ -760,6 +792,7 @@ async def start_execution(*, session: Session = Depends(get_session), payload: E
     tags = payload.tags or []
     priority = payload.priority or "medium"
     category = payload.category
+    model_name = payload.model or DEFAULT_MODEL
 
     test_case: Optional[TestCase] = None
     if payload.test_case_id:
@@ -780,6 +813,7 @@ async def start_execution(*, session: Session = Depends(get_session), payload: E
         category=category,
         priority=priority,
         tags=tags,
+        model=model_name,
     )
     session.add(execution)
     session.commit()
@@ -795,6 +829,7 @@ async def start_batch_execution(*, session: Session = Depends(get_session), payl
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No test case ids provided")
 
     executions: List[TestExecutionRead] = []
+    model_name = payload.model or DEFAULT_MODEL
     for case_id in payload.test_case_ids:
         test_case = session.get(TestCase, case_id)
         if not test_case:
@@ -808,6 +843,7 @@ async def start_batch_execution(*, session: Session = Depends(get_session), payl
             category=test_case.category,
             priority=test_case.priority,
             tags=_normalize_tags(payload.tags + test_case.tags),
+            model=model_name,
         )
         session.add(execution)
         session.commit()
