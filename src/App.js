@@ -935,8 +935,8 @@ const ExecutionCenter = ({ refreshKey, availableTags, onDataChanged }) => {
   const [selectedExecutionId, setSelectedExecutionId] = useState(null);
   const [executionDetails, setExecutionDetails] = useState(null);
   const [error, setError] = useState(null);
-  const [singleRunForm, setSingleRunForm] = useState({ testCaseId: '', requestedBy: '', tags: '' });
-  const [promptRunForm, setPromptRunForm] = useState({ prompt: '', name: '', requestedBy: '', tags: '', priority: 'medium', category: '' });
+  const [singleRunForm, setSingleRunForm] = useState({ testCaseId: '', requestedBy: '', tags: '', model: '' });
+  const [promptRunForm, setPromptRunForm] = useState({ prompt: '', name: '', requestedBy: '', tags: '', priority: 'medium', category: '', model: '' });
   const [batchSelection, setBatchSelection] = useState([]);
 
   const loadExecutions = useCallback(async () => {
@@ -1062,6 +1062,7 @@ const ExecutionCenter = ({ refreshKey, availableTags, onDataChanged }) => {
         test_case_id: Number(singleRunForm.testCaseId),
         requested_by: singleRunForm.requestedBy || undefined,
         tags: parseTags(singleRunForm.tags),
+        model: singleRunForm.model || undefined,
       };
       const response = await fetch(`${API_BASE_URL}/executions`, {
         method: 'POST',
@@ -1070,7 +1071,7 @@ const ExecutionCenter = ({ refreshKey, availableTags, onDataChanged }) => {
       });
       if (!response.ok) throw new Error('Failed to start execution');
       const data = await response.json();
-      setSingleRunForm({ testCaseId: '', requestedBy: '', tags: '' });
+      setSingleRunForm({ testCaseId: '', requestedBy: '', tags: '', model: '' });
       await loadExecutions();
       onDataChanged();
       await fetchExecutionDetails(data.id);
@@ -1090,6 +1091,7 @@ const ExecutionCenter = ({ refreshKey, availableTags, onDataChanged }) => {
         tags: parseTags(promptRunForm.tags),
         priority: promptRunForm.priority,
         category: promptRunForm.category || undefined,
+        model: promptRunForm.model || undefined,
       };
       const response = await fetch(`${API_BASE_URL}/executions`, {
         method: 'POST',
@@ -1098,7 +1100,7 @@ const ExecutionCenter = ({ refreshKey, availableTags, onDataChanged }) => {
       });
       if (!response.ok) throw new Error('Failed to start natural language execution');
       const data = await response.json();
-      setPromptRunForm({ prompt: '', name: '', requestedBy: '', tags: '', priority: 'medium', category: '' });
+      setPromptRunForm({ prompt: '', name: '', requestedBy: '', tags: '', priority: 'medium', category: '', model: '' });
       await loadExecutions();
       onDataChanged();
       await fetchExecutionDetails(data.id);
@@ -1115,6 +1117,7 @@ const ExecutionCenter = ({ refreshKey, availableTags, onDataChanged }) => {
         test_case_ids: batchSelection,
         requested_by: singleRunForm.requestedBy || undefined,
         tags: parseTags(singleRunForm.tags),
+        model: singleRunForm.model || undefined,
       };
       const response = await fetch(`${API_BASE_URL}/executions/batch`, {
         method: 'POST',
@@ -1160,7 +1163,7 @@ const ExecutionCenter = ({ refreshKey, availableTags, onDataChanged }) => {
                 </option>
               ))}
             </select>
-            <div className="grid gap-3 md:grid-cols-2">
+            <div className="grid gap-3 md:grid-cols-3">
               <input
                 value={singleRunForm.requestedBy}
                 onChange={(event) => setSingleRunForm((prev) => ({ ...prev, requestedBy: event.target.value }))}
@@ -1171,6 +1174,12 @@ const ExecutionCenter = ({ refreshKey, availableTags, onDataChanged }) => {
                 value={singleRunForm.tags}
                 onChange={(event) => setSingleRunForm((prev) => ({ ...prev, tags: event.target.value }))}
                 placeholder="Tags (comma separated)"
+                className="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+              />
+              <input
+                value={singleRunForm.model}
+                onChange={(event) => setSingleRunForm((prev) => ({ ...prev, model: event.target.value }))}
+                placeholder="Model (optional)"
                 className="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
               />
             </div>
@@ -1206,6 +1215,12 @@ const ExecutionCenter = ({ refreshKey, availableTags, onDataChanged }) => {
                 </label>
               ))}
             </div>
+            <input
+              value={singleRunForm.model}
+              onChange={(event) => setSingleRunForm((prev) => ({ ...prev, model: event.target.value }))}
+              placeholder="Model to use (optional)"
+              className="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+            />
             <button
               type="submit"
               className="inline-flex items-center gap-2 rounded-xl border border-emerald-500/50 bg-emerald-500/10 px-4 py-2 text-sm text-emerald-200 hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-50"
@@ -1238,7 +1253,7 @@ const ExecutionCenter = ({ refreshKey, availableTags, onDataChanged }) => {
                 className="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
               />
             </div>
-            <div className="grid gap-3 md:grid-cols-2">
+            <div className="grid gap-3 md:grid-cols-3">
               <select
                 value={promptRunForm.priority}
                 onChange={(event) => setPromptRunForm((prev) => ({ ...prev, priority: event.target.value }))}
@@ -1253,6 +1268,12 @@ const ExecutionCenter = ({ refreshKey, availableTags, onDataChanged }) => {
                 value={promptRunForm.category}
                 onChange={(event) => setPromptRunForm((prev) => ({ ...prev, category: event.target.value }))}
                 placeholder="Category"
+                className="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+              />
+              <input
+                value={promptRunForm.model}
+                onChange={(event) => setPromptRunForm((prev) => ({ ...prev, model: event.target.value }))}
+                placeholder="Model (optional)"
                 className="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
               />
             </div>
@@ -1310,6 +1331,7 @@ const ExecutionCenter = ({ refreshKey, availableTags, onDataChanged }) => {
                     </span>
                     {execution.priority ? <span className="capitalize">Priority {execution.priority}</span> : null}
                     {execution.category ? <span>Category {execution.category}</span> : null}
+                    {execution.model ? <span>Model {execution.model}</span> : null}
                   </div>
                 </button>
               ))}
@@ -1345,6 +1367,7 @@ const ExecutionCenter = ({ refreshKey, availableTags, onDataChanged }) => {
             ) : null}
             <div className="grid gap-3 text-xs text-slate-400">
               <div>Requested By: {executionDetails.requested_by || 'automation-bot'}</div>
+              <div>Model: {executionDetails.model || 'Default configuration'}</div>
               <div>Started: {executionDetails.started_at ? format(parseISO(executionDetails.started_at), 'PPpp') : 'Pending'}</div>
               <div>
                 Completed: {executionDetails.completed_at ? format(parseISO(executionDetails.completed_at), 'PPpp') : 'In progress'}
