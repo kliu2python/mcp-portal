@@ -1,71 +1,112 @@
-# MCP Portal Deployment
+# Web Automation Quality Portal
 
-This repository contains a React frontend and a FastAPI backend for the MCP portal. The stack now ships with containerized deployment assets and Redis-backed task/session management.
+Web Automation Quality Portal is a full-stack test automation control center that combines a FastAPI backend with a modern React dashboard. It enables QA teams to describe tests in natural language, manage reusable scripted cases, and monitor executions with detailed reporting, screenshots, and analytics.
 
-## Prerequisites
+## Key Capabilities
 
-- Docker and Docker Compose
-- An OpenAI compatible API key if you intend to run MCP tasks (set `OPENAI_API_KEY`)
+### Intelligent Test Execution
+- Launch single test cases, batch suites, or natural-language prompts that are translated into actionable automation steps.
+- Monitor progress in real time with server-sent events, live status updates, and per-step screenshots.
+- Capture execution metadata including duration, pass/fail counts, requester, and linked test cases.
 
-## Running with Docker Compose
+### Test Case Management
+- Create, edit, and delete structured test cases with step-by-step definitions.
+- Organise cases with categories, tags, owners, lifecycle status, and priority.
+- Apply bulk updates for status, priority, and tagging across multiple cases at once.
 
-1. Copy your environment variables into a `.env` file (optional) or export them in your shell:
+### Reporting & Analytics
+- Rich dashboards summarising test coverage, execution throughput, pass rates, and active runs.
+- Trend analysis for daily execution counts, success/failure ratios, and duration averages.
+- Category and priority breakdown visualisations for quick risk assessment.
 
-   ```bash
-   export OPENAI_API_KEY=sk-...
-   export OPENAI_MODEL=gpt-4.1-mini
-   export OPENAI_BASE_URL=https://api.openai.com/v1
-   export REACT_APP_API_BASE_URL=http://localhost:8000
-   ```
+### Data Persistence
+- SQLModel-powered relational storage backed by SQLite by default (MySQL support via `DATABASE_URL`).
+- Automation artefacts such as generated screenshots are stored beneath the `reports/` directory and exposed via static routes.
 
-2. Build and start the services:
+## Getting Started
 
-   ```bash
-   docker-compose up --build
-   ```
+### Prerequisites
+- Node.js 18+
+- Python 3.11+
+- Optional: Docker & Docker Compose for containerised deployment
 
-   This starts three containers:
+### Local Development
 
-   - **redis** – stores active/previous task metadata and console streams.
-   - **backend** – FastAPI application on `http://localhost:8000`.
-   - **frontend** – Static React build served on `http://localhost:3000`.
-
-3. Visit `http://localhost:3000` in your browser.
-
-### Persistent Task Logs
-
-Task output is streamed into Redis and persisted to text files under `backend/task_logs`. The directory is mounted into the backend container so logs survive restarts.
-
-You can download a task log via the API:
+Start the backend API:
 
 ```bash
-curl -LO http://localhost:8000/tasks/<task_id>/log/download
+cd backend
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --reload
 ```
 
-## Deploying to Kubernetes
+By default the backend uses SQLite at `automation.db`. Override the database by setting `DATABASE_URL`, for example `mysql+pymysql://user:password@host:3306/automation`.
 
-A set of manifests that mirror the docker-compose stack is available in [`k8s/mcp-portal.yaml`](k8s/mcp-portal.yaml). The accompanying [`k8s/README.md`](k8s/README.md) explains how to build/push the images, create the required secrets, and apply the manifests to a cluster.
+Start the React frontend (in a separate terminal):
 
-## Backend API Enhancements
+```bash
+npm install
+npm start
+```
 
-- Redis now tracks active, completed, cancelled, and failed tasks along with their console output.
-- `/tasks` and related endpoints expose task history, logs, and downloadable text files for long-term storage.
-- Console logs are persisted automatically at task completion and remain available via Redis for replay or future storage solutions.
+Set `REACT_APP_API_BASE_URL` in your environment if the backend is hosted on a different origin (default: `http://localhost:8000`).
 
-## Development Notes
+### Docker Compose
 
-- The frontend build embeds `REACT_APP_API_BASE_URL` at compile time. Override the default during build with:
+A production-style stack is available via Docker Compose:
 
-  ```bash
-  REACT_APP_API_BASE_URL=http://your-backend:8000 docker-compose build frontend
-  ```
+```bash
+docker-compose up --build
+```
 
-- To run the backend locally without Docker, install dependencies and start Uvicorn:
+This launches:
+- **backend** – FastAPI service exposing the automation APIs on `http://localhost:8000`.
+- **frontend** – Optimised React build served by Nginx on `http://localhost:3000`.
 
-  ```bash
-  pip install -r backend/requirements.txt
-  uvicorn backend.main:app --reload
-  ```
+Backend volumes persist the SQLite database (`/app/data`) and generated reports (`/app/reports`). Configure MySQL by setting `DATABASE_URL` before running Compose.
 
-  Ensure `REDIS_URL` points to an accessible Redis instance.
+## API Overview
+
+- `GET /test-cases` – List cases with filtering support.
+- `POST /test-cases` – Create a structured test case.
+- `POST /test-cases/bulk-update` – Apply bulk lifecycle changes.
+- `POST /executions` – Start a single execution from a case or prompt.
+- `POST /executions/batch` – Trigger multiple cases simultaneously.
+- `GET /executions/{id}/stream` – Server-sent events feed for live monitoring.
+- `GET /metrics/summary` – Overall metrics for dashboards.
+
+See `backend/main.py` for the full schema and endpoint definitions.
+
+## Testing & Quality
+
+- The React dashboard uses Recharts for analytics, Tailwind utility classes, and Lucide icons for a consistent design system.
+- FastAPI streams live execution updates to the UI and generates placeholder screenshots for each step using Pillow.
+- SQLModel ensures database portability between SQLite (default) and MySQL.
+
+## Project Structure
+
+```
+backend/            FastAPI application, SQLModel models, execution engine
+backend/reports/    Generated execution artefacts and screenshots
+frontend (src/)     React components, dashboard UI, and automation workflows
+public/             Static assets for the frontend
+```
+
+## Environment Variables
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `DATABASE_URL` | SQLAlchemy connection string | `sqlite:///./automation.db` |
+| `REPORT_ROOT` | Directory for generated reports | `reports` |
+| `STEP_DELAY_SECONDS` | Delay between simulated steps | `0.6` |
+| `DEFAULT_EXECUTOR` | Fallback requester name | `automation-bot` |
+| `REACT_APP_API_BASE_URL` | Frontend build-time API base URL | `http://localhost:8000` |
+
+## Roadmap Ideas
+
+- Plug actual browser automation engines (e.g., Playwright or Selenium) into the execution pipeline.
+- Integrate authentication and role-based access controls for large organisations.
+- Extend analytics with flaky test detection, build pipeline correlations, and release readiness gates.
 
