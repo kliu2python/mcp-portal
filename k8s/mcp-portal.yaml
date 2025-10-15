@@ -9,74 +9,10 @@ metadata:
   name: backend-config
   namespace: mcp-portal
 data:
-  OPENAI_MODEL: "gpt-4.1-mini"
-  OPENAI_BASE_URL: "https://api.openai.com/v1"
-  REDIS_URL: "redis://redis:6379/0"
+  OPENAI_MODEL: "qwen3-vl"
+  OPENAI_BASE_URL: "https://litellm.ai-server.fortiappsec.com/v1/"
+  REDIS_URL: "redis://10.160.13.16:6379/0"
   TASK_LOG_DIR: "/app/task_logs"
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: redis-data
-  namespace: mcp-portal
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: redis
-  namespace: mcp-portal
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: redis
-  template:
-    metadata:
-      labels:
-        app: redis
-    spec:
-      containers:
-        - name: redis
-          image: redis:7-alpine
-          ports:
-            - containerPort: 6379
-          volumeMounts:
-            - name: redis-storage
-              mountPath: /data
-      volumes:
-        - name: redis-storage
-          persistentVolumeClaim:
-            claimName: redis-data
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: redis
-  namespace: mcp-portal
-spec:
-  selector:
-    app: redis
-  ports:
-    - port: 6379
-      targetPort: 6379
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: backend-logs
-  namespace: mcp-portal
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -95,7 +31,7 @@ spec:
     spec:
       containers:
         - name: backend
-          image: mcp-portal-backend:latest
+          image: 10.160.16.60/ai_services/mcp_server:backend_v0.2
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
@@ -109,8 +45,9 @@ spec:
               mountPath: /app/task_logs
       volumes:
         - name: task-logs
-          persistentVolumeClaim:
-            claimName: backend-logs
+          hostPath:
+            path: /home/fortinet/mcp_log   # make sure this exists on the node
+            type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service
@@ -120,6 +57,7 @@ metadata:
 spec:
   selector:
     app: backend
+  type: NodePort
   ports:
     - port: 8000
       targetPort: 8000
@@ -141,7 +79,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: mcp-portal-frontend:latest
+          image: 10.160.16.60/ai_services/mcp_server:frontend_v0.2
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 80
