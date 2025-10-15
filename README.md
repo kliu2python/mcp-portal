@@ -42,6 +42,10 @@ You can download a task log via the API:
 curl -LO http://localhost:8000/tasks/<task_id>/log/download
 ```
 
+## Deploying to Kubernetes
+
+A set of manifests that mirror the docker-compose stack is available in [`k8s/mcp-portal.yaml`](k8s/mcp-portal.yaml). The accompanying [`k8s/README.md`](k8s/README.md) explains how to build/push the images, create the required secrets, and apply the manifests to a cluster.
+
 ## Backend API Enhancements
 
 - Redis now tracks active, completed, cancelled, and failed tasks along with their console output.
