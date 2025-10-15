@@ -381,6 +381,15 @@ const MCPPortal = () => {
       return;
     }
 
+    const serverUrl = currentSession.port
+      ? `${selectedMCP.baseUrl}:${currentSession.port.proxy}/sse`
+      : selectedMCP.url;
+
+    if (!serverUrl) {
+      addConsoleLog('Selected MCP does not have a server URL configured', 'error');
+      return;
+    }
+
     const hasXpraPort = Boolean(currentSession?.port?.xpra);
 
     if (!hasExecuted && !isInitialRunActive && hasXpraPort) {
@@ -396,9 +405,9 @@ const MCPPortal = () => {
     addConsoleLog(`Starting task: ${task}`, 'info');
     
     if (currentSession.port) {
-      addConsoleLog(`Using MCP proxy: ${selectedMCP.baseUrl}:${currentSession.port.proxy}/sse`, 'info');
+      addConsoleLog(`Using MCP proxy: ${serverUrl}`, 'info');
     } else {
-      addConsoleLog(`Using MCP server: ${selectedMCP.url}`, 'info');
+      addConsoleLog(`Using MCP server: ${serverUrl}`, 'info');
     }
     
     let streamCompleted = false;
@@ -412,7 +421,7 @@ const MCPPortal = () => {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ task }),
+        body: JSON.stringify({ task, server_url: serverUrl }),
         signal: taskAbortControllerRef.current.signal,
       });
 
