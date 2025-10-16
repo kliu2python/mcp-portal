@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import {
   Activity,
   ClipboardList,
@@ -51,6 +52,9 @@ function TestCasesTab({
   taskServerInfo,
   manualRunRecord,
 }) {
+  const [isRunXpraExpanded, setIsRunXpraExpanded] = useState(false);
+  const [isManualXpraExpanded, setIsManualXpraExpanded] = useState(false);
+
   const allSelected =
     filteredTestCases.length > 0 &&
     filteredTestCases.every((testCase) => selectedTestCaseIds.includes(testCase.id));
@@ -353,10 +357,33 @@ function TestCasesTab({
                 </div>
                 <div className="grid gap-4 lg:grid-cols-2">
                   <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-4">
-                    <h4 className="mb-3 flex items-center gap-2 text-sm font-semibold text-gray-200">
-                      <Monitor className="h-4 w-4 text-purple-300" /> Xpra Session
-                    </h4>
-                    <div className="h-64 overflow-hidden rounded-md border border-slate-800 bg-black">
+                    <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <h4 className="flex items-center gap-2 text-sm font-semibold text-gray-200">
+                        <Monitor className="h-4 w-4 text-purple-300" /> Xpra Session
+                      </h4>
+                      <div className="flex items-center gap-2 text-xs">
+                        <button
+                          type="button"
+                          onClick={() => setIsRunXpraExpanded((previous) => !previous)}
+                          className="rounded border border-slate-600 px-2 py-1 text-gray-200 transition hover:border-purple-400 hover:text-purple-200"
+                        >
+                          {isRunXpraExpanded ? 'Collapse' : 'Expand'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => selectedRun?.xpra_url && window.open(selectedRun.xpra_url, '_blank', 'noopener,noreferrer')}
+                          disabled={!selectedRun?.xpra_url}
+                          className="rounded border border-slate-600 px-2 py-1 text-gray-200 transition hover:border-purple-400 hover:text-purple-200 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
+                        >
+                          Pop out
+                        </button>
+                      </div>
+                    </div>
+                    <div
+                      className={`overflow-hidden rounded-md border border-slate-800 bg-black ${
+                        isRunXpraExpanded ? 'min-h-[32rem]' : 'h-64'
+                      }`}
+                    >
                       <XpraFrame src={selectedRun.xpra_url} />
                     </div>
                   </div>
@@ -559,8 +586,31 @@ function TestCasesTab({
                     </p>
                   )}
                 </div>
-                <div className="mt-4 h-56 overflow-hidden rounded-md border border-slate-800 bg-black">
+                <div className="mt-4 flex flex-col gap-2">
+                  <div className="flex items-center justify-end gap-2 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setIsManualXpraExpanded((previous) => !previous)}
+                      className="rounded border border-slate-600 px-2 py-1 text-gray-200 transition hover:border-purple-400 hover:text-purple-200"
+                    >
+                      {isManualXpraExpanded ? 'Collapse' : 'Expand'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => taskServerInfo?.xpraUrl && window.open(taskServerInfo.xpraUrl, '_blank', 'noopener,noreferrer')}
+                      disabled={!taskServerInfo?.xpraUrl}
+                      className="rounded border border-slate-600 px-2 py-1 text-gray-200 transition hover:border-purple-400 hover:text-purple-200 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
+                    >
+                      Pop out
+                    </button>
+                  </div>
+                  <div
+                    className={`overflow-hidden rounded-md border border-slate-800 bg-black ${
+                      isManualXpraExpanded ? 'min-h-[32rem]' : 'h-56'
+                    }`}
+                  >
                   <XpraFrame src={taskServerInfo.xpraUrl} />
+                  </div>
                 </div>
               </div>
               {manualRunRecord && (
