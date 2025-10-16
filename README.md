@@ -42,6 +42,20 @@ You can download a task log via the API:
 curl -LO http://localhost:8000/tasks/<task_id>/log/download
 ```
 
+## Building and publishing Docker images
+
+The repository ships with a helper script that builds both the frontend and backend images and (optionally) pushes them to a registry. This avoids running two separate `docker build` commands every time you update the stack.
+
+```
+# Build both images and tag them under your registry/namespace
+./scripts/build-images.sh -r ghcr.io/your-org -t v1.2.3
+
+# Build and push (requires registry login)
+./scripts/build-images.sh -r ghcr.io/your-org -t v1.2.3 --push
+```
+
+Use `./scripts/build-images.sh --help` to see the available options, including how to override the API base URL used during the frontend build.
+
 ## Deploying to Kubernetes
 
 A set of manifests that mirror the docker-compose stack is available in [`k8s/mcp-portal.yaml`](k8s/mcp-portal.yaml). The accompanying [`k8s/README.md`](k8s/README.md) explains how to build/push the images, create the required secrets, and apply the manifests to a cluster.
