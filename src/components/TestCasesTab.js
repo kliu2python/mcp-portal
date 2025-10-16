@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Activity,
   ClipboardList,
@@ -52,8 +52,29 @@ function TestCasesTab({
   taskServerInfo,
   manualRunRecord,
 }) {
-  const [isRunXpraExpanded, setIsRunXpraExpanded] = useState(false);
-  const [isManualXpraExpanded, setIsManualXpraExpanded] = useState(false);
+  const [isRunXpraModalOpen, setIsRunXpraModalOpen] = useState(false);
+  const [isManualXpraModalOpen, setIsManualXpraModalOpen] = useState(false);
+
+  useEffect(() => {
+    if (view !== 'history') {
+      setIsRunXpraModalOpen(false);
+    }
+    if (view !== 'manual') {
+      setIsManualXpraModalOpen(false);
+    }
+  }, [view]);
+
+  useEffect(() => {
+    if (!selectedRun?.xpra_url) {
+      setIsRunXpraModalOpen(false);
+    }
+  }, [selectedRun]);
+
+  useEffect(() => {
+    if (!taskServerInfo?.xpraUrl) {
+      setIsManualXpraModalOpen(false);
+    }
+  }, [taskServerInfo]);
 
   const allSelected =
     filteredTestCases.length > 0 &&
@@ -364,10 +385,11 @@ function TestCasesTab({
                       <div className="flex items-center gap-2 text-xs">
                         <button
                           type="button"
-                          onClick={() => setIsRunXpraExpanded((previous) => !previous)}
-                          className="rounded border border-slate-600 px-2 py-1 text-gray-200 transition hover:border-purple-400 hover:text-purple-200"
+                          onClick={() => setIsRunXpraModalOpen(true)}
+                          disabled={!selectedRun?.xpra_url}
+                          className="rounded border border-slate-600 px-2 py-1 text-gray-200 transition hover:border-purple-400 hover:text-purple-200 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
                         >
-                          {isRunXpraExpanded ? 'Collapse' : 'Expand'}
+                          Open popup
                         </button>
                         <button
                           type="button"
@@ -379,13 +401,9 @@ function TestCasesTab({
                         </button>
                       </div>
                     </div>
-                    <div
-                      className={`overflow-hidden rounded-md border border-slate-800 bg-black ${
-                        isRunXpraExpanded ? 'min-h-[32rem]' : 'h-64'
-                      }`}
-                    >
-                      <XpraFrame src={selectedRun.xpra_url} />
-                    </div>
+                    <p className="text-sm text-gray-400">
+                      Launch the embedded Xpra session in a popup window for a larger view.
+                    </p>
                   </div>
                   <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-4">
                     <h4 className="mb-3 flex items-center gap-2 text-sm font-semibold text-gray-200">
@@ -590,10 +608,11 @@ function TestCasesTab({
                   <div className="flex items-center justify-end gap-2 text-xs">
                     <button
                       type="button"
-                      onClick={() => setIsManualXpraExpanded((previous) => !previous)}
-                      className="rounded border border-slate-600 px-2 py-1 text-gray-200 transition hover:border-purple-400 hover:text-purple-200"
+                      onClick={() => setIsManualXpraModalOpen(true)}
+                      disabled={!taskServerInfo?.xpraUrl}
+                      className="rounded border border-slate-600 px-2 py-1 text-gray-200 transition hover:border-purple-400 hover:text-purple-200 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
                     >
-                      {isManualXpraExpanded ? 'Collapse' : 'Expand'}
+                      Open popup
                     </button>
                     <button
                       type="button"
@@ -604,13 +623,9 @@ function TestCasesTab({
                       Pop out
                     </button>
                   </div>
-                  <div
-                    className={`overflow-hidden rounded-md border border-slate-800 bg-black ${
-                      isManualXpraExpanded ? 'min-h-[32rem]' : 'h-56'
-                    }`}
-                  >
-                  <XpraFrame src={taskServerInfo.xpraUrl} />
-                  </div>
+                  <p className="text-xs text-gray-400 text-right">
+                    Use the popup to interact with the live Xpra session.
+                  </p>
                 </div>
               </div>
               {manualRunRecord && (
@@ -618,6 +633,56 @@ function TestCasesTab({
                   {`Manual run history saved ${manualRunRecord.reference ? 'as ' + manualRunRecord.reference : 'as a draft test case'}${manualRunRecord.runId ? ' (Run #' + manualRunRecord.runId + ')' : ''}. Review it in the task catalog when ready.`}
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isRunXpraModalOpen && selectedRun?.xpra_url && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setIsRunXpraModalOpen(false)}
+        >
+          <div
+            className="relative w-full max-w-3xl overflow-hidden rounded-lg border border-slate-700 bg-slate-900/95 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => setIsRunXpraModalOpen(false)}
+              className="absolute right-4 top-4 rounded border border-slate-600 px-3 py-1 text-xs text-gray-200 transition hover:border-purple-400 hover:text-purple-200"
+            >
+              Close
+            </button>
+            <div className="h-[36rem] w-full">
+              <XpraFrame src={selectedRun.xpra_url} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isManualXpraModalOpen && taskServerInfo?.xpraUrl && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setIsManualXpraModalOpen(false)}
+        >
+          <div
+            className="relative w-full max-w-3xl overflow-hidden rounded-lg border border-slate-700 bg-slate-900/95 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => setIsManualXpraModalOpen(false)}
+              className="absolute right-4 top-4 rounded border border-slate-600 px-3 py-1 text-xs text-gray-200 transition hover:border-purple-400 hover:text-purple-200"
+            >
+              Close
+            </button>
+            <div className="h-[36rem] w-full">
+              <XpraFrame src={taskServerInfo.xpraUrl} />
             </div>
           </div>
         </div>
