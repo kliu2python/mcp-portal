@@ -4,7 +4,9 @@ import asyncio
 import json
 import os
 import uuid
+from collections import deque
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional
@@ -15,7 +17,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field, HttpUrl
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, select
+import httpx
+
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -85,6 +89,36 @@ class ModelConfig(Base):
     )
 
 
+class PromptTemplate(Base):
+    __tablename__ = "prompt_templates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(150), unique=True, nullable=False)
+    description = Column(Text, nullable=True)
+    template = Column(Text, nullable=False)
+    is_system = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+
+class LLMModel(Base):
+    __tablename__ = "llm_models"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(150), unique=True, nullable=False)
+    base_url = Column(String(255), nullable=False)
+    api_key = Column(String(255), nullable=False)
+    model_name = Column(String(150), nullable=False)
+    description = Column(Text, nullable=True)
+    is_system = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+
 class TestRun(Base):
     __tablename__ = "test_runs"
 
@@ -111,16 +145,86 @@ run_queue: asyncio.Queue[int] = asyncio.Queue()
 _run_workers: list[asyncio.Task[Any]] = []
 
 
+@dataclass(frozen=True)
+class SessionDefinition:
+    identifier: str
+    server_url: str
+    xpra_url: str
+
+
+class SessionPool:
+    def __init__(self, sessions: List[SessionDefinition]):
+        self._available: list[SessionDefinition] = list(sessions)
+        self._in_use: Dict[str, SessionDefinition] = {}
+        self._waiters: deque[asyncio.Future[SessionDefinition]] = deque()
+        self._lock = asyncio.Lock()
+
+    async def acquire_nowait(self) -> SessionDefinition | None:
+        async with self._lock:
+            if self._available:
+                allocation = self._available.pop()
+                self._in_use[allocation.identifier] = allocation
+                return allocation
+            return None
+
+    async def acquire(self) -> SessionDefinition:
+        async with self._lock:
+            if self._available:
+                allocation = self._available.pop()
+                self._in_use[allocation.identifier] = allocation
+                return allocation
+            loop = asyncio.get_running_loop()
+            future: asyncio.Future[SessionDefinition] = loop.create_future()
+            self._waiters.append(future)
+
+        allocation = await future
+        return allocation
+
+    async def release(self, allocation: SessionDefinition) -> None:
+        async with self._lock:
+            if self._in_use.pop(allocation.identifier, None) is None:
+                return
+            while self._waiters:
+                waiter = self._waiters.popleft()
+                if waiter.done():
+                    continue
+                waiter.set_result(allocation)
+                return
+            self._available.append(allocation)
+
+
+SESSION_POOL = SessionPool(
+    [
+        SessionDefinition("8882", "http://10.160.13.110:8882/sse", "http://10.160.13.110:10000"),
+        SessionDefinition("8883", "http://10.160.13.110:8883/sse", "http://10.160.13.110:10001"),
+        SessionDefinition("8884", "http://10.160.13.110:8884/sse", "http://10.160.13.110:10002"),
+        SessionDefinition("8885", "http://10.160.13.110:8885/sse", "http://10.160.13.110:10003"),
+    ]
+)
+
+DEFAULT_PROMPT_TEMPLATE = (
+    "You are an expert QA automation agent. Carefully execute the requested task and "
+    "return clear, concise results. Task instructions:\n{task}"
+)
+
+
 class ManagedTask:
     """Represents an asynchronously executing MCP task."""
 
-    def __init__(self, prompt: str, server_url: str | None) -> None:
-        self.prompt = prompt
+    def __init__(self, task_text: str, prompt_template: str | None, llm_settings: Dict[str, str] | None) -> None:
+        self.task_text = task_text
+        self.prompt_template = prompt_template
+        self.llm_settings = llm_settings
         self.queue: asyncio.Queue[str | None] = asyncio.Queue()
         self.task: asyncio.Task | None = None
+        self.waiter: asyncio.Task | None = None
         self.done = asyncio.Event()
         self.status: str = "pending"
-        self.server_url = server_url
+        self.server_url: str | None = None
+        self.xpra_url: str | None = None
+        self.session: SessionDefinition | None = None
+        self.rendered_prompt: str | None = None
+        self.cancel_requested = False
 
 
 _tasks: Dict[str, ManagedTask] = {}
@@ -138,6 +242,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def _on_startup() -> None:
     await _initialise_database()
+    await _ensure_default_records()
     await _resume_queued_runs()
     worker_count = int(os.getenv("TEST_RUN_WORKERS", "2"))
     for index in range(worker_count):
@@ -156,7 +261,9 @@ async def _on_shutdown() -> None:
 
 class TaskRequest(BaseModel):
     task: str
-    server_url: HttpUrl | None = None
+    model_id: Optional[int] = None
+    prompt_id: Optional[int] = None
+    prompt_text: Optional[str] = None
 
 
 class TestCaseBase(BaseModel):
@@ -215,6 +322,61 @@ class ModelConfigRead(ModelConfigBase):
     updated_at: datetime
 
 
+class PromptTemplateBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=150)
+    description: Optional[str] = None
+    template: str = Field(..., min_length=1)
+
+
+class PromptTemplateCreate(PromptTemplateBase):
+    pass
+
+
+class PromptTemplateUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=150)
+    description: Optional[str] = None
+    template: Optional[str] = Field(default=None, min_length=1)
+
+
+class PromptTemplateRead(PromptTemplateBase):
+    id: int
+    is_system: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class LLMModelBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=150)
+    base_url: HttpUrl
+    api_key: str = Field(..., min_length=1)
+    model_name: str = Field(..., min_length=1, max_length=150)
+    description: Optional[str] = None
+
+
+class LLMModelCreate(LLMModelBase):
+    pass
+
+
+class LLMModelUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=150)
+    base_url: Optional[HttpUrl] = None
+    api_key: Optional[str] = Field(default=None, min_length=1)
+    model_name: Optional[str] = Field(default=None, min_length=1, max_length=150)
+    description: Optional[str] = None
+
+
+class LLMModelRead(BaseModel):
+    id: int
+    name: str
+    base_url: HttpUrl
+    model_name: str
+    description: Optional[str]
+    is_system: bool
+    masked_api_key: str
+    created_at: datetime
+    updated_at: datetime
+
+
 class TestRunLogEntry(BaseModel):
     timestamp: datetime
     type: str
@@ -245,9 +407,8 @@ class TestRunRequest(BaseModel):
     model_config_payload: Optional[ModelConfigCreate] = Field(
         default=None, alias="model_config"
     )
-    server_url: Optional[HttpUrl] = None
-    xpra_url: Optional[HttpUrl] = None
     prompt: Optional[str] = None
+    prompt_id: Optional[int] = None
 
 
 class QualityCategoryInsight(BaseModel):
@@ -341,6 +502,86 @@ def _model_config_to_read(config: ModelConfig) -> ModelConfigRead:
     )
 
 
+def _mask_api_key(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:4]}{'*' * (len(value) - 8)}{value[-4:]}"
+
+
+def _prompt_to_read(template: PromptTemplate) -> PromptTemplateRead:
+    return PromptTemplateRead(
+        id=template.id,
+        name=template.name,
+        description=template.description,
+        template=template.template,
+        is_system=template.is_system,
+        created_at=template.created_at,
+        updated_at=template.updated_at,
+    )
+
+
+def _llm_model_to_read(model: LLMModel) -> LLMModelRead:
+    return LLMModelRead(
+        id=model.id,
+        name=model.name,
+        base_url=model.base_url,
+        model_name=model.model_name,
+        description=model.description,
+        is_system=model.is_system,
+        masked_api_key=_mask_api_key(model.api_key),
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+    )
+
+
+def _render_task_prompt(task_text: str, prompt_template: Optional[str]) -> str:
+    template = prompt_template or DEFAULT_PROMPT_TEMPLATE
+    try:
+        if "{task}" in template:
+            return template.format(task=task_text)
+    except (KeyError, ValueError):  # pragma: no cover - defensive formatting
+        pass
+    cleaned_template = template.strip()
+    return f"{cleaned_template}\n\nTask Instructions:\n{task_text}" if cleaned_template else task_text
+
+
+async def _verify_openai_model(base_url: str, api_key: str, model_name: str) -> None:
+    url = f"{base_url.rstrip('/')}/models/{model_name}"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(url, headers=headers)
+    except httpx.HTTPError as exc:  # pragma: no cover - network dependent
+        raise HTTPException(status_code=400, detail=f"Unable to reach model endpoint: {exc}") from exc
+
+    if response.status_code == 200:
+        return
+    if response.status_code == 404:
+        raise HTTPException(status_code=400, detail="Model not found at provided endpoint.")
+    raise HTTPException(
+        status_code=400,
+        detail=f"Model verification failed with status {response.status_code}: {response.text[:200]}",
+    )
+
+
+async def _get_prompt_template(session: AsyncSession, prompt_id: int) -> PromptTemplate:
+    prompt = await session.get(PromptTemplate, prompt_id)
+    if prompt is None:
+        raise HTTPException(status_code=404, detail="Prompt template not found.")
+    return prompt
+
+
+async def _get_llm_model(session: AsyncSession, model_id: int) -> LLMModel:
+    model = await session.get(LLMModel, model_id)
+    if model is None:
+        raise HTTPException(status_code=404, detail="LLM model not found.")
+    return model
+
+
 def _test_run_to_read(run: TestRun) -> TestRunRead:
     logs_raw = _load_json_list(run.log)
     log_entries: List[TestRunLogEntry] = []
@@ -404,14 +645,89 @@ async def _initialise_database() -> None:
         await conn.run_sync(Base.metadata.create_all)
 
 
+async def _ensure_default_records() -> None:
+    default_prompt_name = os.getenv("DEFAULT_PROMPT_NAME", "Default Task Prompt")
+    default_prompt_template = os.getenv("DEFAULT_PROMPT_TEMPLATE", DEFAULT_PROMPT_TEMPLATE)
+    default_llm_name = os.getenv("DEFAULT_LLM_MODEL_NAME", "Configured Default Model")
+    base_url = os.getenv("OPENAI_BASE_URL")
+    api_key = os.getenv("OPENAI_API_KEY")
+    model_name = os.getenv("OPENAI_MODEL")
+
+    async with AsyncSessionLocal() as session:
+        prompt_result = await session.execute(
+            select(PromptTemplate).where(PromptTemplate.is_system.is_(True))
+        )
+        prompt = prompt_result.scalars().first()
+        if prompt is None:
+            session.add(
+                PromptTemplate(
+                    name=default_prompt_name,
+                    description="Default prompt configured from environment.",
+                    template=default_prompt_template,
+                    is_system=True,
+                )
+            )
+        else:
+            updated = False
+            if prompt.name != default_prompt_name:
+                prompt.name = default_prompt_name
+                updated = True
+            if prompt.template != default_prompt_template:
+                prompt.template = default_prompt_template
+                updated = True
+            if prompt.description != "Default prompt configured from environment.":
+                prompt.description = "Default prompt configured from environment."
+                updated = True
+            if updated:
+                prompt.updated_at = datetime.utcnow()
+
+        if base_url and api_key and model_name:
+            model_result = await session.execute(
+                select(LLMModel).where(LLMModel.is_system.is_(True))
+            )
+            model = model_result.scalars().first()
+            if model is None:
+                session.add(
+                    LLMModel(
+                        name=default_llm_name,
+                        base_url=str(base_url),
+                        api_key=api_key,
+                        model_name=model_name,
+                        description="Default model configured from environment.",
+                        is_system=True,
+                    )
+                )
+            else:
+                updated = False
+                if model.name != default_llm_name:
+                    model.name = default_llm_name
+                    updated = True
+                if model.base_url != str(base_url):
+                    model.base_url = str(base_url)
+                    updated = True
+                if model.model_name != model_name:
+                    model.model_name = model_name
+                    updated = True
+                if model.description != "Default model configured from environment.":
+                    model.description = "Default model configured from environment."
+                    updated = True
+                if model.api_key != api_key:
+                    model.api_key = api_key
+                    updated = True
+                if updated:
+                    model.updated_at = datetime.utcnow()
+
+        await session.commit()
+
+
 async def _resume_queued_runs() -> None:
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(TestRun).where(TestRun.status.in_(["queued", "running"]))
+            select(TestRun).where(TestRun.status.in_(["queued", "running", "pending"]))
         )
         runs = result.scalars().all()
         for run in runs:
-            if run.status == "running":
+            if run.status in {"running", "pending"}:
                 run.status = "queued"
                 run.started_at = None
                 run.task_id = None
@@ -428,7 +744,7 @@ async def _process_test_run(run_id: int) -> None:
         if run is None:
             return
 
-        if run.status != "queued":
+        if run.status not in {"queued", "pending"}:
             return
 
         test_case = await session.get(TestCase, run.test_case_id)
@@ -440,11 +756,32 @@ async def _process_test_run(run_id: int) -> None:
             await _append_run_log_entry(session, run, "Test case not found", "error")
             return
 
+        allocation: SessionDefinition | None = await SESSION_POOL.acquire_nowait()
+        if allocation is None:
+            run.status = "pending"
+            run.updated_at = datetime.utcnow()
+            await session.commit()
+            await _append_run_log_entry(
+                session,
+                run,
+                "Waiting for available MCP session.",
+                "info",
+            )
+            allocation = await SESSION_POOL.acquire()
+
         run.status = "running"
         run.started_at = datetime.utcnow()
         run.updated_at = datetime.utcnow()
+        run.server_url = allocation.server_url
+        run.xpra_url = allocation.xpra_url
         await session.commit()
 
+        await _append_run_log_entry(
+            session,
+            run,
+            f"Assigned MCP session {allocation.identifier} ({allocation.server_url})",
+            "info",
+        )
         await _append_run_log_entry(
             session,
             run,
@@ -453,7 +790,7 @@ async def _process_test_run(run_id: int) -> None:
         )
 
         try:
-            async for payload in run_agent(run.prompt, run.server_url):
+            async for payload in run_agent(run.prompt, run.server_url, None, "{task}"):
                 try:
                     data = json.loads(payload)
                     message_type = str(data.get("type", "info"))
@@ -476,6 +813,10 @@ async def _process_test_run(run_id: int) -> None:
             run.updated_at = datetime.utcnow()
             await session.commit()
             return
+        finally:
+            if allocation is not None:
+                with suppress(Exception):  # pragma: no cover - defensive
+                    await SESSION_POOL.release(allocation)
 
         run.status = "completed"
         run.result = "success"
@@ -650,6 +991,152 @@ async def delete_model_config(config_id: int, session: AsyncSession = Depends(ge
     await session.commit()
 
 
+@app.get("/prompts", response_model=List[PromptTemplateRead])
+async def list_prompts(session: AsyncSession = Depends(get_db)):
+    result = await session.execute(select(PromptTemplate).order_by(PromptTemplate.created_at.desc()))
+    prompts = result.scalars().all()
+    return [_prompt_to_read(prompt) for prompt in prompts]
+
+
+@app.post("/prompts", response_model=PromptTemplateRead, status_code=201)
+async def create_prompt(
+    payload: PromptTemplateCreate, session: AsyncSession = Depends(get_db)
+):
+    prompt = PromptTemplate(
+        name=payload.name,
+        description=payload.description,
+        template=payload.template,
+        is_system=False,
+    )
+    session.add(prompt)
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="Prompt name already exists.")
+    await session.refresh(prompt)
+    return _prompt_to_read(prompt)
+
+
+@app.put("/prompts/{prompt_id}", response_model=PromptTemplateRead)
+async def update_prompt(
+    prompt_id: int, payload: PromptTemplateUpdate, session: AsyncSession = Depends(get_db)
+):
+    prompt = await session.get(PromptTemplate, prompt_id)
+    if prompt is None:
+        raise HTTPException(status_code=404, detail="Prompt template not found.")
+    if prompt.is_system:
+        raise HTTPException(status_code=400, detail="System prompts cannot be modified.")
+
+    if payload.name is not None:
+        prompt.name = payload.name
+    if payload.description is not None:
+        prompt.description = payload.description
+    if payload.template is not None:
+        prompt.template = payload.template
+
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="Prompt name already exists.")
+    await session.refresh(prompt)
+    return _prompt_to_read(prompt)
+
+
+@app.delete("/prompts/{prompt_id}", status_code=204)
+async def delete_prompt(prompt_id: int, session: AsyncSession = Depends(get_db)):
+    prompt = await session.get(PromptTemplate, prompt_id)
+    if prompt is None:
+        raise HTTPException(status_code=404, detail="Prompt template not found.")
+    if prompt.is_system:
+        raise HTTPException(status_code=400, detail="System prompts cannot be deleted.")
+
+    await session.delete(prompt)
+    await session.commit()
+
+
+@app.get("/llm-models", response_model=List[LLMModelRead])
+async def list_llm_models(session: AsyncSession = Depends(get_db)):
+    result = await session.execute(select(LLMModel).order_by(LLMModel.created_at.desc()))
+    models = result.scalars().all()
+    return [_llm_model_to_read(model) for model in models]
+
+
+@app.post("/llm-models", response_model=LLMModelRead, status_code=201)
+async def create_llm_model(
+    payload: LLMModelCreate, session: AsyncSession = Depends(get_db)
+):
+    await _verify_openai_model(str(payload.base_url), payload.api_key, payload.model_name)
+
+    model = LLMModel(
+        name=payload.name,
+        base_url=str(payload.base_url),
+        api_key=payload.api_key,
+        model_name=payload.model_name,
+        description=payload.description,
+        is_system=False,
+    )
+    session.add(model)
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="Model name already exists.")
+    await session.refresh(model)
+    return _llm_model_to_read(model)
+
+
+@app.put("/llm-models/{model_id}", response_model=LLMModelRead)
+async def update_llm_model(
+    model_id: int, payload: LLMModelUpdate, session: AsyncSession = Depends(get_db)
+):
+    model = await session.get(LLMModel, model_id)
+    if model is None:
+        raise HTTPException(status_code=404, detail="LLM model not found.")
+    if model.is_system:
+        raise HTTPException(status_code=400, detail="System models cannot be modified.")
+
+    new_base_url = str(payload.base_url) if payload.base_url is not None else model.base_url
+    new_api_key = payload.api_key if payload.api_key is not None else model.api_key
+    new_model_name = payload.model_name if payload.model_name is not None else model.model_name
+
+    if (
+        new_base_url != model.base_url
+        or new_api_key != model.api_key
+        or new_model_name != model.model_name
+    ):
+        await _verify_openai_model(new_base_url, new_api_key, new_model_name)
+
+    if payload.name is not None:
+        model.name = payload.name
+    if payload.description is not None:
+        model.description = payload.description
+    model.base_url = new_base_url
+    model.api_key = new_api_key
+    model.model_name = new_model_name
+
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="Model name already exists.")
+    await session.refresh(model)
+    return _llm_model_to_read(model)
+
+
+@app.delete("/llm-models/{model_id}", status_code=204)
+async def delete_llm_model(model_id: int, session: AsyncSession = Depends(get_db)):
+    model = await session.get(LLMModel, model_id)
+    if model is None:
+        raise HTTPException(status_code=404, detail="LLM model not found.")
+    if model.is_system:
+        raise HTTPException(status_code=400, detail="System models cannot be deleted.")
+
+    await session.delete(model)
+    await session.commit()
+
+
 def _build_prompt_for_case(test_case: TestCase, override_prompt: Optional[str]) -> str:
     if override_prompt:
         return override_prompt
@@ -706,17 +1193,22 @@ async def queue_test_runs(
             status_code=404, detail=f"Test case(s) not found: {', '.join(map(str, missing))}"
         )
 
+    prompt_override = payload.prompt
+    if payload.prompt_id is not None:
+        prompt_template = await _get_prompt_template(session, payload.prompt_id)
+        prompt_override = prompt_template.template
+
     created_runs: List[TestRun] = []
     for case_id in payload.test_case_ids:
         test_case = test_cases[case_id]
-        prompt = _build_prompt_for_case(test_case, payload.prompt)
+        prompt = _build_prompt_for_case(test_case, prompt_override)
         run = TestRun(
             test_case_id=test_case.id,
             model_config_id=model_config_id,
             status="queued",
             prompt=prompt,
-            server_url=str(payload.server_url) if payload.server_url else None,
-            xpra_url=str(payload.xpra_url) if payload.xpra_url else None,
+            server_url=None,
+            xpra_url=None,
         )
         session.add(run)
         created_runs.append(run)
@@ -844,37 +1336,71 @@ async def _safe_redis_call(coro):
         raise RuntimeError(f"Redis operation failed: {exc}") from exc
 
 
-async def _register_task(task_id: str, prompt: str) -> None:
+async def _register_task(
+    task_id: str,
+    task_text: str,
+    *,
+    status: str = "running",
+    prompt: str | None = None,
+    server_url: str | None = None,
+    xpra_url: str | None = None,
+) -> None:
     timestamp = datetime.utcnow().isoformat()
+    mapping = {
+        "task": task_text,
+        "prompt": prompt or task_text,
+        "status": status,
+        "created_at": timestamp,
+        "updated_at": timestamp,
+    }
+    if server_url:
+        mapping["server_url"] = server_url
+    if xpra_url:
+        mapping["xpra_url"] = xpra_url
+
     await _safe_redis_call(
         redis_client.hset(
             f"task:{task_id}",
-            mapping={
-                "prompt": prompt,
-                "status": "running",
-                "created_at": timestamp,
-                "updated_at": timestamp,
-            },
+            mapping=mapping,
         )
     )
     await _safe_redis_call(redis_client.sadd("tasks:all", task_id))
-    await _safe_redis_call(redis_client.sadd("tasks:active", task_id))
+    if status == "running":
+        await _safe_redis_call(redis_client.sadd("tasks:active", task_id))
+    elif status == "pending":
+        await _safe_redis_call(redis_client.sadd("tasks:pending", task_id))
+
+
+async def _update_task_metadata(task_id: str, mapping: Dict[str, Any]) -> None:
+    status = mapping.get("status")
+    if status is not None:
+        for bucket in ["active", "pending", "completed", "failed", "cancelled"]:
+            await _safe_redis_call(redis_client.srem(f"tasks:{bucket}", task_id))
+        if status == "running":
+            await _safe_redis_call(redis_client.sadd("tasks:active", task_id))
+        elif status == "pending":
+            await _safe_redis_call(redis_client.sadd("tasks:pending", task_id))
+        else:
+            await _safe_redis_call(redis_client.sadd(f"tasks:{status}", task_id))
+
+    await _safe_redis_call(
+        redis_client.hset(
+            f"task:{task_id}",
+            mapping={**mapping, "updated_at": datetime.utcnow().isoformat()},
+        )
+    )
 
 
 async def _append_task_log(task_id: str, payload: str) -> None:
     entry = json.dumps({"timestamp": datetime.utcnow().isoformat(), "payload": payload})
     await _safe_redis_call(redis_client.rpush(f"task:{task_id}:log", entry))
-    await _safe_redis_call(
-        redis_client.hset(
-            f"task:{task_id}",
-            mapping={"updated_at": datetime.utcnow().isoformat()},
-        )
-    )
+    await _update_task_metadata(task_id, {})
 
 
 async def _finalize_task(task_id: str, status: str) -> None:
     timestamp = datetime.utcnow().isoformat()
     await _safe_redis_call(redis_client.srem("tasks:active", task_id))
+    await _safe_redis_call(redis_client.srem("tasks:pending", task_id))
     await _safe_redis_call(redis_client.srem("tasks:completed", task_id))
     await _safe_redis_call(redis_client.srem("tasks:failed", task_id))
     await _safe_redis_call(redis_client.srem("tasks:cancelled", task_id))
@@ -976,7 +1502,12 @@ async def _get_task_log_entries(task_id: str) -> List[Dict[str, object]]:
     return parsed
 
 
-async def run_agent(task: str, server_url: str | None) -> AsyncIterator[str]:
+async def run_agent(
+    task: str,
+    server_url: str | None,
+    llm_settings: Optional[Dict[str, str]],
+    prompt_template: Optional[str],
+) -> AsyncIterator[str]:
     load_dotenv()
 
     resolved_server_url = server_url or os.getenv(
@@ -993,18 +1524,27 @@ async def run_agent(task: str, server_url: str | None) -> AsyncIterator[str]:
 
     client = MCPClient.from_dict(config)
 
-    llm = ChatOpenAI(
-        model=os.getenv("OPENAI_MODEL"),
-        base_url=os.getenv("OPENAI_BASE_URL"),
-        api_key=os.getenv("OPENAI_API_KEY"),
-    )
+    if llm_settings:
+        llm = ChatOpenAI(
+            model=llm_settings["model_name"],
+            base_url=llm_settings["base_url"],
+            api_key=llm_settings["api_key"],
+        )
+    else:
+        llm = ChatOpenAI(
+            model=os.getenv("OPENAI_MODEL"),
+            base_url=os.getenv("OPENAI_BASE_URL"),
+            api_key=os.getenv("OPENAI_API_KEY"),
+        )
 
     agent = MCPAgent(llm=llm, client=client, max_steps=30)
+
+    final_prompt = _render_task_prompt(task, prompt_template)
 
     yield json.dumps({"type": "info", "message": "Starting task execution."})
 
     try:
-        result = await agent.run(task, max_steps=30)
+        result = await agent.run(final_prompt, max_steps=30)
     except Exception as exc:  # pragma: no cover - defensive
         yield json.dumps({"type": "error", "message": str(exc)})
         raise
@@ -1013,12 +1553,67 @@ async def run_agent(task: str, server_url: str | None) -> AsyncIterator[str]:
     yield json.dumps({"type": "result", "message": result})
 
 
+async def _activate_managed_task(
+    task_id: str, managed_task: ManagedTask, allocation: SessionDefinition
+) -> None:
+    managed_task.session = allocation
+    managed_task.server_url = allocation.server_url
+    managed_task.xpra_url = allocation.xpra_url
+    managed_task.status = "running"
+    managed_task.waiter = None
+    rendered_prompt = managed_task.rendered_prompt or _render_task_prompt(
+        managed_task.task_text, managed_task.prompt_template
+    )
+    managed_task.rendered_prompt = rendered_prompt
+    await _update_task_metadata(
+        task_id,
+        {
+            "status": "running",
+            "server_url": allocation.server_url,
+            "xpra_url": allocation.xpra_url,
+            "prompt": rendered_prompt,
+        },
+    )
+    session_payload = json.dumps(
+        {
+            "type": "session",
+            "message": f"Assigned MCP session {allocation.identifier}",
+            "serverUrl": allocation.server_url,
+            "xpraUrl": allocation.xpra_url,
+        }
+    )
+    await managed_task.queue.put(session_payload)
+    await _append_task_log(task_id, session_payload)
+    managed_task.task = asyncio.create_task(_agent_worker(task_id, managed_task))
+
+
+async def _await_session(task_id: str, managed_task: ManagedTask) -> None:
+    try:
+        allocation = await SESSION_POOL.acquire()
+    except asyncio.CancelledError:
+        managed_task.waiter = None
+        raise
+
+    if managed_task.cancel_requested:
+        managed_task.waiter = None
+        await SESSION_POOL.release(allocation)
+        return
+
+    managed_task.waiter = None
+    await _activate_managed_task(task_id, managed_task, allocation)
+
+
 async def _agent_worker(task_id: str, managed_task: ManagedTask) -> None:
     """Background worker that executes the MCP agent and streams output."""
 
-    managed_task.status = "completed"
+    managed_task.status = "running"
     try:
-        async for message in run_agent(managed_task.prompt, managed_task.server_url):
+        async for message in run_agent(
+            managed_task.task_text,
+            managed_task.server_url,
+            managed_task.llm_settings,
+            managed_task.prompt_template,
+        ):
             await _append_task_log(task_id, message)
             await managed_task.queue.put(message)
     except asyncio.CancelledError:
@@ -1037,6 +1632,8 @@ async def _agent_worker(task_id: str, managed_task: ManagedTask) -> None:
         )
         await _append_task_log(task_id, json.dumps({"type": "error", "message": str(exc)}))
     finally:
+        if managed_task.status == "running":
+            managed_task.status = "completed"
         await managed_task.queue.put(None)
         managed_task.done.set()
         try:
@@ -1049,37 +1646,97 @@ async def _agent_worker(task_id: str, managed_task: ManagedTask) -> None:
             if managed_task.status in {"completed", "failed", "cancelled"}:
                 with suppress(Exception):  # pragma: no cover - defensive
                     await _persist_log_file(task_id)
+        if managed_task.session is not None:
+            with suppress(Exception):  # pragma: no cover - defensive
+                await SESSION_POOL.release(managed_task.session)
         async with _tasks_lock:
             _tasks.pop(task_id, None)
 
 
 @app.post("/run-task")
 async def run_task(request: TaskRequest):
-    if not request.task.strip():
+    task_text = request.task.strip()
+    if not task_text:
         raise HTTPException(status_code=400, detail="Task cannot be empty.")
 
     task_id = uuid.uuid4().hex
-    server_url = str(request.server_url) if request.server_url else None
-    if not server_url:
-        raise HTTPException(status_code=400, detail="MCP server URL is required.")
+    prompt_template: Optional[str] = None
+    llm_settings: Optional[Dict[str, str]] = None
 
-    managed_task = ManagedTask(prompt=request.task, server_url=server_url)
-    managed_task.status = "running"
+    async with AsyncSessionLocal() as session:
+        if request.prompt_id is not None:
+            prompt_template = (await _get_prompt_template(session, request.prompt_id)).template
+        elif request.prompt_text:
+            prompt_template = request.prompt_text
+
+        if request.model_id is not None:
+            model = await _get_llm_model(session, request.model_id)
+            llm_settings = {
+                "model_name": model.model_name,
+                "base_url": model.base_url,
+                "api_key": model.api_key,
+            }
+
+    managed_task = ManagedTask(task_text=task_text, prompt_template=prompt_template, llm_settings=llm_settings)
 
     async with _tasks_lock:
         _tasks[task_id] = managed_task
 
+    initial_prompt = _render_task_prompt(task_text, prompt_template)
+    managed_task.rendered_prompt = initial_prompt
+
+    allocation: SessionDefinition | None = None
     try:
-        await _register_task(task_id, request.task)
+        allocation = await SESSION_POOL.acquire_nowait()
+        if allocation is None:
+            managed_task.status = "pending"
+            await _register_task(
+                task_id,
+                task_text,
+                status="pending",
+                prompt=initial_prompt,
+            )
+            waiting_payload = json.dumps(
+                {
+                    "type": "info",
+                    "message": "Waiting for available MCP session.",
+                }
+            )
+            await _append_task_log(task_id, waiting_payload)
+            await managed_task.queue.put(waiting_payload)
+            managed_task.waiter = asyncio.create_task(_await_session(task_id, managed_task))
+        else:
+            managed_task.status = "running"
+            managed_task.server_url = allocation.server_url
+            managed_task.xpra_url = allocation.xpra_url
+            await _register_task(
+                task_id,
+                task_text,
+                status="running",
+                prompt=initial_prompt,
+                server_url=allocation.server_url,
+                xpra_url=allocation.xpra_url,
+            )
+            await _activate_managed_task(task_id, managed_task, allocation)
+            allocation = None  # ownership transferred to managed task
     except RuntimeError as exc:
         async with _tasks_lock:
             _tasks.pop(task_id, None)
+        if allocation is not None:
+            with suppress(Exception):  # pragma: no cover - defensive
+                await SESSION_POOL.release(allocation)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    managed_task.task = asyncio.create_task(_agent_worker(task_id, managed_task))
-
     async def event_stream() -> AsyncIterator[bytes]:
-        initial_payload = json.dumps({"type": "task", "taskId": task_id})
+        initial_payload = json.dumps(
+            {
+                "type": "task",
+                "taskId": task_id,
+                "status": managed_task.status,
+                "serverUrl": managed_task.server_url,
+                "xpraUrl": managed_task.xpra_url,
+            }
+        )
         with suppress(Exception):  # pragma: no cover - defensive
             await _append_task_log(task_id, initial_payload)
         yield f"data: {initial_payload}\n\n".encode("utf-8")
@@ -1101,8 +1758,25 @@ async def cancel_task(task_id: str):
     async with _tasks_lock:
         managed_task = _tasks.get(task_id)
 
-    if managed_task is None or managed_task.task is None:
+    if managed_task is None:
         raise HTTPException(status_code=404, detail="Task not found or already completed.")
+
+    if managed_task.task is None:
+        managed_task.cancel_requested = True
+        if managed_task.waiter is not None:
+            managed_task.waiter.cancel()
+            with suppress(asyncio.CancelledError):
+                await managed_task.waiter
+            managed_task.waiter = None
+        cancel_payload = json.dumps({"type": "cancelled", "message": "Task cancelled."})
+        await _append_task_log(task_id, cancel_payload)
+        await managed_task.queue.put(cancel_payload)
+        await managed_task.queue.put(None)
+        managed_task.done.set()
+        await _finalize_task(task_id, "cancelled")
+        async with _tasks_lock:
+            _tasks.pop(task_id, None)
+        return {"status": "cancelled"}
 
     if managed_task.task.done():
         return {"status": "completed"}
@@ -1121,6 +1795,7 @@ async def cancel_task(task_id: str):
 async def list_tasks():
     try:
         active = await _fetch_task_list("tasks:active")
+        pending = await _fetch_task_list("tasks:pending")
         completed = await _fetch_task_list("tasks:completed")
         cancelled = await _fetch_task_list("tasks:cancelled")
         failed = await _fetch_task_list("tasks:failed")
@@ -1129,6 +1804,7 @@ async def list_tasks():
 
     return {
         "active": active,
+        "pending": pending,
         "completed": completed,
         "cancelled": cancelled,
         "failed": failed,

@@ -35,6 +35,9 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
+          env:
+            - name: DATABASE_FILE
+              value: /app/data/data.db
           envFrom:
             - configMapRef:
                 name: backend-config
@@ -43,10 +46,16 @@ spec:
           volumeMounts:
             - name: task-logs
               mountPath: /app/task_logs
+            - name: backend-data
+              mountPath: /app/data
       volumes:
         - name: task-logs
           hostPath:
             path: /home/fortinet/mcp_log   # make sure this exists on the node
+            type: DirectoryOrCreate
+        - name: backend-data
+          hostPath:
+            path: /home/fortinet/mcp_db
             type: DirectoryOrCreate
 ---
 apiVersion: v1
