@@ -126,11 +126,17 @@ function TestCasesTab({
     }
   }, [view]);
 
+  const normalizedRunStatus = useMemo(
+    () => (selectedRun?.status ? String(selectedRun.status).toLowerCase() : ''),
+    [selectedRun?.status]
+  );
+  const canOpenRunXpra = Boolean(selectedRun?.xpra_url) && normalizedRunStatus === 'running';
+
   useEffect(() => {
-    if (!selectedRun?.xpra_url) {
+    if (!canOpenRunXpra) {
       setIsRunXpraModalOpen(false);
     }
-  }, [selectedRun]);
+  }, [canOpenRunXpra]);
 
   useEffect(() => {
     if (!taskServerInfo?.xpraUrl) {
@@ -544,16 +550,24 @@ function TestCasesTab({
                       <div className="flex items-center gap-2 text-xs">
                         <button
                           type="button"
-                          onClick={() => setIsRunXpraModalOpen(true)}
-                          disabled={!selectedRun?.xpra_url}
+                          onClick={() => {
+                            if (canOpenRunXpra) {
+                              setIsRunXpraModalOpen(true);
+                            }
+                          }}
+                          disabled={!canOpenRunXpra}
                           className="rounded border border-slate-600 px-2 py-1 text-gray-200 transition hover:border-purple-400 hover:text-purple-200 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
                         >
                           Open popup
                         </button>
                         <button
                           type="button"
-                          onClick={() => openXpraWindow(selectedRun?.xpra_url)}
-                          disabled={!selectedRun?.xpra_url}
+                          onClick={() => {
+                            if (canOpenRunXpra) {
+                              openXpraWindow(selectedRun?.xpra_url);
+                            }
+                          }}
+                          disabled={!canOpenRunXpra}
                           className="rounded border border-slate-600 px-2 py-1 text-gray-200 transition hover:border-purple-400 hover:text-purple-200 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
                         >
                           Pop out
@@ -563,6 +577,11 @@ function TestCasesTab({
                     <p className="text-sm text-gray-400">
                       Launch the embedded Xpra session in a popup window for a larger view.
                     </p>
+                    {!canOpenRunXpra && (
+                      <p className="mt-2 text-xs text-gray-500">
+                        Xpra access is only available while the task is running.
+                      </p>
+                    )}
                   </div>
                   <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-4">
                     <h4 className="mb-3 flex items-center gap-2 text-sm font-semibold text-gray-200">
@@ -802,15 +821,15 @@ function TestCasesTab({
         </div>
       )}
 
-      {isRunXpraModalOpen && selectedRun?.xpra_url && (
+      {isRunXpraModalOpen && canOpenRunXpra && (
         <div
-          className="fixed w-4/5 h-4/5 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 bg-black/80"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 px-4 py-6"
           role="dialog"
           aria-modal="true"
           onClick={() => setIsRunXpraModalOpen(false)}
         >
           <div
-            className="flex h-full w-full flex-col bg-slate-950"
+            className="flex h-[80vh] w-full max-w-6xl flex-col overflow-hidden rounded-lg border border-slate-800 bg-slate-950 shadow-xl"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="flex-1 min-h-0">
@@ -822,13 +841,13 @@ function TestCasesTab({
 
       {isManualXpraModalOpen && taskServerInfo?.xpraUrl && (
         <div
-          className="fixed w-4/5 h-4/5 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 bg-black/80"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 px-4 py-6"
           role="dialog"
           aria-modal="true"
           onClick={() => setIsManualXpraModalOpen(false)}
         >
           <div
-            className="flex h-full w-full flex-col bg-slate-950"
+            className="flex h-[80vh] w-full max-w-6xl flex-col overflow-hidden rounded-lg border border-slate-800 bg-slate-950 shadow-xl"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="flex-1 min-h-0">
