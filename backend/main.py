@@ -1657,6 +1657,30 @@ def _prepare_stream_event(value: Any) -> Any:
     return str(value)
 
 
+def _should_skip_stream_event(event: Dict[str, Any]) -> bool:
+    event_type = str(event.get("event") or "")
+    if event_type != "on_chat_model_stream":
+        return False
+
+    data = event.get("data")
+    if not isinstance(data, dict):
+        return False
+
+    chunk = data.get("chunk")
+    if isinstance(chunk, dict):
+        chunk_type = chunk.get("type")
+        if isinstance(chunk_type, str) and chunk_type == "AIMessageChunk":
+            return True
+    elif isinstance(chunk, str) and chunk == "AIMessageChunk":
+        return True
+
+    chunk_type = data.get("chunk_type")
+    if isinstance(chunk_type, str) and chunk_type == "AIMessageChunk":
+        return True
+
+    return False
+
+
 def _summarize_stream_event(event: Dict[str, Any]) -> tuple[str, Optional[str]]:
     event_type = str(event.get("event") or "")
     event_name = str(event.get("name") or "")
@@ -1748,6 +1772,8 @@ async def run_agent(
     try:
         async for raw_event in agent.stream_events(final_prompt, max_steps=30):
             safe_event = _prepare_stream_event(raw_event)
+            if _should_skip_stream_event(safe_event):
+                continue
             message, result_candidate = _summarize_stream_event(safe_event)
             payload: Dict[str, Any] = {
                 "type": "event",
