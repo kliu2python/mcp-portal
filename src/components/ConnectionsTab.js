@@ -1,4 +1,4 @@
-import { Edit3, Loader2, RefreshCcw, Trash2, Upload } from 'lucide-react';
+import { Edit3, Loader2, PlugZap, RefreshCcw, Trash2, Upload } from 'lucide-react';
 
 function ConnectionsTab({
   modelConfigs,
@@ -9,10 +9,33 @@ function ConnectionsTab({
   onLlmFormChange,
   onLlmFormReset,
   isSavingLlm,
+  onTestLlm,
+  isTestingLlm,
+  llmTestStatus,
+  canSubmitLlm,
   llmModels,
   onLlmEdit,
   onLlmDelete,
 }) {
+  const renderTestStatus = () => {
+    if (!llmTestStatus) {
+      return null;
+    }
+    if (!llmForm.id && llmTestStatus.state === 'idle') {
+      return <p className="text-xs text-gray-500">Test the connection to enable saving.</p>;
+    }
+    if (llmTestStatus.state === 'pending') {
+      return <p className="text-xs text-gray-400">{llmTestStatus.message}</p>;
+    }
+    if (llmTestStatus.state === 'success') {
+      return <p className="text-xs text-emerald-300">{llmTestStatus.message}</p>;
+    }
+    if (llmTestStatus.state === 'error') {
+      return <p className="text-xs text-rose-300">{llmTestStatus.message}</p>;
+    }
+    return null;
+  };
+
   return (
     <div className="space-y-6">
       <section className="rounded-lg border border-slate-700 bg-slate-900/60 p-6">
@@ -114,15 +137,32 @@ function ConnectionsTab({
                 className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
               />
             </div>
-            <div className="flex items-center gap-3">
-              <button
-                type="submit"
-                disabled={isSavingLlm}
-                className="flex items-center gap-2 rounded-md bg-purple-600 px-4 py-2 text-white transition-colors hover:bg-purple-700 disabled:cursor-not-allowed disabled:bg-purple-900/40"
-              >
-                {isSavingLlm ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-                {llmForm.id ? 'Update LLM' : 'Add LLM'}
-              </button>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={onTestLlm}
+                  disabled={
+                    isTestingLlm ||
+                    isSavingLlm ||
+                    !llmForm.baseUrl.trim() ||
+                    !llmForm.modelName.trim() ||
+                    (!llmForm.id && !llmForm.apiKey.trim())
+                  }
+                  className="flex items-center gap-2 rounded-md border border-slate-700 px-4 py-2 text-sm text-gray-200 transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
+                >
+                  {isTestingLlm ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlugZap className="h-4 w-4" />}
+                  Test Connection
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingLlm || isTestingLlm || !canSubmitLlm}
+                  className="flex items-center gap-2 rounded-md bg-purple-600 px-4 py-2 text-white transition-colors hover:bg-purple-700 disabled:cursor-not-allowed disabled:bg-purple-900/40"
+                >
+                  {isSavingLlm ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+                  {llmForm.id ? 'Update LLM' : 'Add LLM'}
+                </button>
+              </div>
               {llmForm.id && (
                 <button
                   type="button"
@@ -133,6 +173,7 @@ function ConnectionsTab({
                 </button>
               )}
             </div>
+            {renderTestStatus()}
           </div>
         </form>
 

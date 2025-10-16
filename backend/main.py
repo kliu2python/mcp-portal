@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from langchain_openai import ChatOpenAI
+from langchain_core.messages import BaseMessage
 from mcp_use import MCPAgent, MCPClient
 
 import redis.asyncio as redis
@@ -1575,6 +1576,133 @@ async def _get_task_log_entries(task_id: str) -> List[Dict[str, object]]:
     return parsed
 
 
+def _truncate_text(text: str, limit: int = 160) -> str:
+    collapsed = " ".join(str(text).split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return f"{collapsed[: limit - 1]}…"
+
+
+def _extract_first_text(value: Any, preferred_keys: tuple[str, ...] = ()) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, dict):
+        for key in preferred_keys:
+            if key in value:
+                candidate = _extract_first_text(value[key], preferred_keys)
+                if candidate:
+                    return candidate
+        for key in value:
+            candidate = _extract_first_text(value[key], preferred_keys)
+            if candidate:
+                return candidate
+        return None
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            candidate = _extract_first_text(item, preferred_keys)
+            if candidate:
+                return candidate
+        return None
+    if isinstance(value, BaseMessage):
+        return _extract_first_text(value.content, preferred_keys)
+    if hasattr(value, "model_dump"):
+        try:
+            dumped = value.model_dump()
+        except Exception:  # pragma: no cover - defensive
+            dumped = None
+        if dumped is not None:
+            return _extract_first_text(dumped, preferred_keys)
+    if hasattr(value, "dict"):
+        try:
+            dumped = value.dict()
+        except Exception:  # pragma: no cover - defensive
+            dumped = None
+        if dumped is not None:
+            return _extract_first_text(dumped, preferred_keys)
+    return None
+
+
+def _prepare_stream_event(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _prepare_stream_event(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_prepare_stream_event(item) for item in value]
+    if isinstance(value, BaseMessage):
+        return {"type": value.type, "content": _prepare_stream_event(value.content)}
+    if hasattr(value, "model_dump"):
+        try:
+            dumped = value.model_dump()
+        except Exception:  # pragma: no cover - defensive
+            dumped = None
+        if dumped is not None:
+            return _prepare_stream_event(dumped)
+    if hasattr(value, "dict"):
+        try:
+            dumped = value.dict()
+        except Exception:  # pragma: no cover - defensive
+            dumped = None
+        if dumped is not None:
+            return _prepare_stream_event(dumped)
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _summarize_stream_event(event: Dict[str, Any]) -> tuple[str, Optional[str]]:
+    event_type = str(event.get("event") or "")
+    event_name = str(event.get("name") or "")
+    data = event.get("data")
+    snippet = _extract_first_text(
+        data,
+        (
+            "message",
+            "output",
+            "observation",
+            "text",
+            "content",
+            "input",
+            "prompt",
+            "tool_input",
+            "tool_output",
+            "result",
+        ),
+    )
+    label_parts: list[str] = []
+    if event_type:
+        label_parts.append(event_type.replace("_", " ").title())
+    if event_name:
+        label_parts.append(event_name)
+    message = " · ".join(label_parts) if label_parts else "Agent event"
+    if snippet:
+        message = f"{message}: {_truncate_text(snippet)}"
+
+    result_text: Optional[str] = None
+    if event_type == "on_chain_end":
+        preferred_output = None
+        if isinstance(data, dict):
+            preferred_output = _extract_first_text(
+                data.get("output"),
+                ("output", "message", "text", "content", "result"),
+            )
+        if preferred_output:
+            result_text = _truncate_text(preferred_output, limit=400)
+        else:
+            fallback = _extract_first_text(data)
+            if fallback:
+                result_text = _truncate_text(fallback, limit=400)
+
+    return message, result_text
+
+
 async def run_agent(
     task: str,
     server_url: str | None,
@@ -1616,14 +1744,34 @@ async def run_agent(
 
     yield json.dumps({"type": "info", "message": "Starting task execution."})
 
+    final_result: Optional[str] = None
     try:
-        result = await agent.run(final_prompt, max_steps=30)
+        async for raw_event in agent.stream_events(final_prompt, max_steps=30):
+            safe_event = _prepare_stream_event(raw_event)
+            message, result_candidate = _summarize_stream_event(safe_event)
+            payload: Dict[str, Any] = {
+                "type": "event",
+                "message": message,
+                "details": safe_event,
+            }
+            event_name = safe_event.get("event")
+            if isinstance(event_name, str) and event_name:
+                payload["eventName"] = event_name
+            event_source = safe_event.get("name")
+            if isinstance(event_source, str) and event_source:
+                payload["eventSource"] = event_source
+            yield json.dumps(payload)
+            if result_candidate:
+                final_result = result_candidate
     except Exception as exc:  # pragma: no cover - defensive
         yield json.dumps({"type": "error", "message": str(exc)})
         raise
 
     yield json.dumps({"type": "success", "message": "Task completed."})
-    yield json.dumps({"type": "result", "message": result})
+    if final_result:
+        yield json.dumps({"type": "result", "message": final_result})
+    else:
+        yield json.dumps({"type": "result", "message": "No final response returned."})
 
 
 async def _activate_managed_task(
