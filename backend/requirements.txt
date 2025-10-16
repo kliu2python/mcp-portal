@@ -4,3 +4,5 @@ python-dotenv
 langchain-openai
 mcp-use
 redis
+sqlalchemy
+aiosqlite

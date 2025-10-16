@@ -7,13 +7,18 @@ import uuid
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
-from typing import AsyncIterator, Dict, List
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl
+
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import declarative_base, sessionmaker
 
 from langchain_openai import ChatOpenAI
 from mcp_use import MCPAgent, MCPClient
@@ -34,6 +39,76 @@ def _get_redis_client() -> "redis.Redis":
 redis_client = _get_redis_client()
 
 LOG_DIR = Path(os.getenv("TASK_LOG_DIR", "task_logs"))
+
+_DEFAULT_DB_PATH = Path(
+    os.getenv("DATABASE_FILE", Path(__file__).resolve().parent / "data.db")
+)
+DATABASE_URL = os.getenv("DATABASE_URL")
+if DATABASE_URL is None:
+    _DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DATABASE_URL = f"sqlite+aiosqlite:///{_DEFAULT_DB_PATH}"
+
+engine = create_async_engine(DATABASE_URL, echo=False, future=True)
+AsyncSessionLocal = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+Base = declarative_base()
+
+
+class TestCase(Base):
+    __tablename__ = "test_cases"
+
+    id = Column(Integer, primary_key=True, index=True)
+    reference = Column(String(100), unique=True, nullable=False)
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    category = Column(String(100), nullable=True)
+    priority = Column(String(50), nullable=False, default="Medium")
+    status = Column(String(50), nullable=False, default="Draft")
+    tags = Column(Text, nullable=False, default="[]")
+    steps = Column(Text, nullable=False, default="[]")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+
+class ModelConfig(Base):
+    __tablename__ = "model_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(150), nullable=False)
+    provider = Column(String(100), nullable=False)
+    description = Column(Text, nullable=True)
+    parameters = Column(Text, nullable=False, default="{}")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+
+class TestRun(Base):
+    __tablename__ = "test_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    test_case_id = Column(Integer, ForeignKey("test_cases.id"), nullable=False)
+    model_config_id = Column(Integer, ForeignKey("model_configs.id"), nullable=True)
+    status = Column(String(50), nullable=False, default="queued")
+    result = Column(String(50), nullable=True)
+    prompt = Column(Text, nullable=False)
+    server_url = Column(String(255), nullable=True)
+    xpra_url = Column(String(255), nullable=True)
+    task_id = Column(String(64), nullable=True)
+    log = Column(Text, nullable=False, default="[]")
+    metrics = Column(Text, nullable=False, default="{}")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+
+
+run_queue: asyncio.Queue[int] = asyncio.Queue()
+_run_workers: list[asyncio.Task[Any]] = []
 
 
 class ManagedTask:
@@ -60,9 +135,701 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+async def _on_startup() -> None:
+    await _initialise_database()
+    await _resume_queued_runs()
+    worker_count = int(os.getenv("TEST_RUN_WORKERS", "2"))
+    for index in range(worker_count):
+        task = asyncio.create_task(_run_worker(index))
+        _run_workers.append(task)
+
+
+@app.on_event("shutdown")
+async def _on_shutdown() -> None:
+    for task in _run_workers:
+        task.cancel()
+    for task in _run_workers:
+        with suppress(asyncio.CancelledError):
+            await task
+
+
 class TaskRequest(BaseModel):
     task: str
     server_url: HttpUrl | None = None
+
+
+class TestCaseBase(BaseModel):
+    reference: str = Field(..., min_length=1, max_length=100)
+    title: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = None
+    category: Optional[str] = None
+    priority: str = Field(default="Medium", max_length=50)
+    status: str = Field(default="Draft", max_length=50)
+    tags: List[str] = Field(default_factory=list)
+    steps: List[str] = Field(default_factory=list)
+
+
+class TestCaseCreate(TestCaseBase):
+    pass
+
+
+class TestCaseUpdate(BaseModel):
+    reference: Optional[str] = Field(default=None, max_length=100)
+    title: Optional[str] = Field(default=None, max_length=255)
+    description: Optional[str] = None
+    category: Optional[str] = None
+    priority: Optional[str] = Field(default=None, max_length=50)
+    status: Optional[str] = Field(default=None, max_length=50)
+    tags: Optional[List[str]] = None
+    steps: Optional[List[str]] = None
+
+
+class TestCaseRead(TestCaseBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ModelConfigBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=150)
+    provider: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = None
+    parameters: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ModelConfigCreate(ModelConfigBase):
+    pass
+
+
+class ModelConfigUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, max_length=150)
+    provider: Optional[str] = Field(default=None, max_length=100)
+    description: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None
+
+
+class ModelConfigRead(ModelConfigBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class TestRunLogEntry(BaseModel):
+    timestamp: datetime
+    type: str
+    message: str
+
+
+class TestRunRead(BaseModel):
+    id: int
+    test_case_id: int
+    model_config_id: Optional[int]
+    status: str
+    result: Optional[str]
+    prompt: str
+    server_url: Optional[str]
+    xpra_url: Optional[str]
+    task_id: Optional[str]
+    log: List[TestRunLogEntry]
+    metrics: Dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+    started_at: Optional[datetime]
+    completed_at: Optional[datetime]
+
+
+class TestRunRequest(BaseModel):
+    test_case_ids: List[int] = Field(..., min_items=1)
+    model_config_id: Optional[int] = None
+    model_config: Optional[ModelConfigCreate] = None
+    server_url: Optional[HttpUrl] = None
+    xpra_url: Optional[HttpUrl] = None
+    prompt: Optional[str] = None
+
+
+class QualityCategoryInsight(BaseModel):
+    key: str
+    total: int
+    pass_rate: float
+
+
+class QualityInsightsResponse(BaseModel):
+    total_test_cases: int
+    ready_test_cases: int
+    blocked_test_cases: int
+    draft_test_cases: int
+    total_runs: int
+    pass_count: int
+    fail_count: int
+    success_rate: float
+    average_duration: float
+    latest_run_at: Optional[datetime]
+    category_breakdown: List[QualityCategoryInsight]
+    priority_breakdown: List[QualityCategoryInsight]
+
+
+def _load_string_list(raw: Optional[str]) -> List[str]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+        return [item for item in data if isinstance(item, str)]
+    except json.JSONDecodeError:
+        return []
+
+
+def _dump_list(items: Optional[List[str]]) -> str:
+    return json.dumps(items or [])
+
+
+def _load_json_list(raw: Optional[str]) -> List[Dict[str, Any]]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return [entry for entry in data if isinstance(entry, dict)]
+    except json.JSONDecodeError:
+        pass
+    return []
+
+
+def _load_dict(raw: Optional[str]) -> Dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        pass
+    return {}
+
+
+def _dump_dict(value: Optional[Dict[str, Any]]) -> str:
+    return json.dumps(value or {})
+
+
+def _test_case_to_read(test_case: TestCase) -> TestCaseRead:
+    return TestCaseRead(
+        id=test_case.id,
+        reference=test_case.reference,
+        title=test_case.title,
+        description=test_case.description,
+        category=test_case.category,
+        priority=test_case.priority,
+        status=test_case.status,
+        tags=_load_string_list(test_case.tags),
+        steps=_load_string_list(test_case.steps),
+        created_at=test_case.created_at,
+        updated_at=test_case.updated_at,
+    )
+
+
+def _model_config_to_read(config: ModelConfig) -> ModelConfigRead:
+    return ModelConfigRead(
+        id=config.id,
+        name=config.name,
+        provider=config.provider,
+        description=config.description,
+        parameters=_load_dict(config.parameters),
+        created_at=config.created_at,
+        updated_at=config.updated_at,
+    )
+
+
+def _test_run_to_read(run: TestRun) -> TestRunRead:
+    logs_raw = _load_json_list(run.log)
+    log_entries: List[TestRunLogEntry] = []
+    for entry in logs_raw:
+        if isinstance(entry, dict):
+            timestamp = entry.get("timestamp")
+            try:
+                parsed_timestamp = datetime.fromisoformat(timestamp) if timestamp else datetime.utcnow()
+            except ValueError:
+                parsed_timestamp = datetime.utcnow()
+            log_entries.append(
+                TestRunLogEntry(
+                    timestamp=parsed_timestamp,
+                    type=str(entry.get("type", "info")),
+                    message=str(entry.get("message", "")),
+                )
+            )
+    metrics = _load_dict(run.metrics)
+    return TestRunRead(
+        id=run.id,
+        test_case_id=run.test_case_id,
+        model_config_id=run.model_config_id,
+        status=run.status,
+        result=run.result,
+        prompt=run.prompt,
+        server_url=run.server_url,
+        xpra_url=run.xpra_url,
+        task_id=run.task_id,
+        log=log_entries,
+        metrics=metrics,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
+    )
+
+
+async def get_db() -> AsyncIterator[AsyncSession]:
+    async with AsyncSessionLocal() as session:
+        yield session
+
+
+async def _append_run_log_entry(
+    session: AsyncSession, run: TestRun, message: str, level: str = "info"
+) -> None:
+    log_entries = _load_json_list(run.log)
+    log_entries.append(
+        {
+            "timestamp": datetime.utcnow().isoformat(),
+            "type": level,
+            "message": message,
+        }
+    )
+    run.log = json.dumps(log_entries[-200:])
+    run.updated_at = datetime.utcnow()
+    await session.commit()
+
+
+async def _initialise_database() -> None:
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
+async def _resume_queued_runs() -> None:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(TestRun).where(TestRun.status.in_(["queued", "running"]))
+        )
+        runs = result.scalars().all()
+        for run in runs:
+            if run.status == "running":
+                run.status = "queued"
+                run.started_at = None
+                run.task_id = None
+                run.updated_at = datetime.utcnow()
+        await session.commit()
+
+        for run in runs:
+            await run_queue.put(run.id)
+
+
+async def _process_test_run(run_id: int) -> None:
+    async with AsyncSessionLocal() as session:
+        run = await session.get(TestRun, run_id)
+        if run is None:
+            return
+
+        if run.status != "queued":
+            return
+
+        test_case = await session.get(TestCase, run.test_case_id)
+        if test_case is None:
+            run.status = "failed"
+            run.result = "missing-test-case"
+            run.completed_at = datetime.utcnow()
+            run.updated_at = datetime.utcnow()
+            await _append_run_log_entry(session, run, "Test case not found", "error")
+            return
+
+        run.status = "running"
+        run.started_at = datetime.utcnow()
+        run.updated_at = datetime.utcnow()
+        await session.commit()
+
+        await _append_run_log_entry(
+            session,
+            run,
+            f"Started run for {test_case.reference}: {test_case.title}",
+            "info",
+        )
+
+        try:
+            async for payload in run_agent(run.prompt, run.server_url):
+                try:
+                    data = json.loads(payload)
+                    message_type = str(data.get("type", "info"))
+                    message_text = str(data.get("message", ""))
+                except json.JSONDecodeError:
+                    message_type = "info"
+                    message_text = payload
+
+                await _append_run_log_entry(session, run, message_text, message_type)
+        except Exception as exc:  # pragma: no cover - defensive
+            await _append_run_log_entry(
+                session,
+                run,
+                f"Run failed: {exc}",
+                "error",
+            )
+            run.status = "failed"
+            run.result = "error"
+            run.completed_at = datetime.utcnow()
+            run.updated_at = datetime.utcnow()
+            await session.commit()
+            return
+
+        run.status = "completed"
+        run.result = "success"
+        run.completed_at = datetime.utcnow()
+        run.updated_at = datetime.utcnow()
+        if run.started_at and run.completed_at:
+            duration = (run.completed_at - run.started_at).total_seconds()
+            metrics = _load_dict(run.metrics)
+            metrics["duration"] = duration
+            run.metrics = _dump_dict(metrics)
+        await session.commit()
+
+        await _append_run_log_entry(
+            session,
+            run,
+            "Run completed successfully.",
+            "success",
+        )
+
+
+async def _run_worker(worker_index: int) -> None:
+    while True:
+        run_id = await run_queue.get()
+        try:
+            await _process_test_run(run_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            async with AsyncSessionLocal() as session:
+                run = await session.get(TestRun, run_id)
+                if run is not None:
+                    run.status = "failed"
+                    run.result = "error"
+                    run.updated_at = datetime.utcnow()
+                    await _append_run_log_entry(
+                        session,
+                        run,
+                        f"Worker {worker_index} encountered an error: {exc}",
+                        "error",
+                    )
+        finally:
+            run_queue.task_done()
+
+
+@app.get("/test-cases", response_model=List[TestCaseRead])
+async def list_test_cases(session: AsyncSession = Depends(get_db)):
+    result = await session.execute(select(TestCase).order_by(TestCase.created_at.desc()))
+    cases = result.scalars().all()
+    return [_test_case_to_read(case) for case in cases]
+
+
+@app.post("/test-cases", response_model=TestCaseRead, status_code=201)
+async def create_test_case(
+    payload: TestCaseCreate, session: AsyncSession = Depends(get_db)
+):
+    test_case = TestCase(
+        reference=payload.reference,
+        title=payload.title,
+        description=payload.description,
+        category=payload.category,
+        priority=payload.priority,
+        status=payload.status,
+        tags=_dump_list(payload.tags),
+        steps=_dump_list(payload.steps),
+    )
+    session.add(test_case)
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=400, detail="Test case reference must be unique.") from exc
+
+    await session.refresh(test_case)
+    return _test_case_to_read(test_case)
+
+
+@app.put("/test-cases/{test_case_id}", response_model=TestCaseRead)
+async def update_test_case(
+    test_case_id: int, payload: TestCaseUpdate, session: AsyncSession = Depends(get_db)
+):
+    test_case = await session.get(TestCase, test_case_id)
+    if test_case is None:
+        raise HTTPException(status_code=404, detail="Test case not found.")
+
+    if payload.reference is not None:
+        test_case.reference = payload.reference
+    if payload.title is not None:
+        test_case.title = payload.title
+    if payload.description is not None:
+        test_case.description = payload.description
+    if payload.category is not None:
+        test_case.category = payload.category
+    if payload.priority is not None:
+        test_case.priority = payload.priority
+    if payload.status is not None:
+        test_case.status = payload.status
+    if payload.tags is not None:
+        test_case.tags = _dump_list(payload.tags)
+    if payload.steps is not None:
+        test_case.steps = _dump_list(payload.steps)
+
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=400, detail="Test case reference must be unique.") from exc
+
+    await session.refresh(test_case)
+    return _test_case_to_read(test_case)
+
+
+@app.delete("/test-cases/{test_case_id}", status_code=204)
+async def delete_test_case(test_case_id: int, session: AsyncSession = Depends(get_db)):
+    test_case = await session.get(TestCase, test_case_id)
+    if test_case is None:
+        raise HTTPException(status_code=404, detail="Test case not found.")
+
+    await session.delete(test_case)
+    await session.commit()
+
+
+@app.get("/model-configs", response_model=List[ModelConfigRead])
+async def list_model_configs(session: AsyncSession = Depends(get_db)):
+    result = await session.execute(select(ModelConfig).order_by(ModelConfig.created_at.desc()))
+    configs = result.scalars().all()
+    return [_model_config_to_read(config) for config in configs]
+
+
+@app.post("/model-configs", response_model=ModelConfigRead, status_code=201)
+async def create_model_config(
+    payload: ModelConfigCreate, session: AsyncSession = Depends(get_db)
+):
+    config = ModelConfig(
+        name=payload.name,
+        provider=payload.provider,
+        description=payload.description,
+        parameters=_dump_dict(payload.parameters),
+    )
+    session.add(config)
+    await session.commit()
+    await session.refresh(config)
+    return _model_config_to_read(config)
+
+
+@app.put("/model-configs/{config_id}", response_model=ModelConfigRead)
+async def update_model_config(
+    config_id: int, payload: ModelConfigUpdate, session: AsyncSession = Depends(get_db)
+):
+    config = await session.get(ModelConfig, config_id)
+    if config is None:
+        raise HTTPException(status_code=404, detail="Model configuration not found.")
+
+    if payload.name is not None:
+        config.name = payload.name
+    if payload.provider is not None:
+        config.provider = payload.provider
+    if payload.description is not None:
+        config.description = payload.description
+    if payload.parameters is not None:
+        config.parameters = _dump_dict(payload.parameters)
+
+    await session.commit()
+    await session.refresh(config)
+    return _model_config_to_read(config)
+
+
+@app.delete("/model-configs/{config_id}", status_code=204)
+async def delete_model_config(config_id: int, session: AsyncSession = Depends(get_db)):
+    config = await session.get(ModelConfig, config_id)
+    if config is None:
+        raise HTTPException(status_code=404, detail="Model configuration not found.")
+
+    await session.delete(config)
+    await session.commit()
+
+
+def _build_prompt_for_case(test_case: TestCase, override_prompt: Optional[str]) -> str:
+    if override_prompt:
+        return override_prompt
+
+    steps = _load_string_list(test_case.steps)
+    steps_section = "\n".join(f"- {step}" for step in steps) if steps else "- Follow documented test scenario steps."
+    description = test_case.description or "No description provided."
+    category = test_case.category or "Uncategorized"
+    return (
+        f"Execute automated test case {test_case.reference}: {test_case.title}.\n"
+        f"Description: {description}\n"
+        f"Category: {category} | Priority: {test_case.priority}\n"
+        f"Steps:\n{steps_section}\n"
+        "Report detailed step results and ensure assertions complete successfully."
+    )
+
+
+@app.post("/test-runs", response_model=List[TestRunRead], status_code=201)
+async def queue_test_runs(
+    payload: TestRunRequest, session: AsyncSession = Depends(get_db)
+):
+    if payload.model_config_id is None and payload.model_config is None:
+        raise HTTPException(
+            status_code=400, detail="Provide model_config_id or model_config payload."
+        )
+
+    model_config_id = payload.model_config_id
+    created_config: Optional[ModelConfig] = None
+    if payload.model_config is not None:
+        created_config = ModelConfig(
+            name=payload.model_config.name,
+            provider=payload.model_config.provider,
+            description=payload.model_config.description,
+            parameters=_dump_dict(payload.model_config.parameters),
+        )
+        session.add(created_config)
+        await session.commit()
+        await session.refresh(created_config)
+        model_config_id = created_config.id
+
+    if model_config_id is None:
+        raise HTTPException(status_code=400, detail="Unable to resolve model configuration.")
+
+    result = await session.execute(
+        select(TestCase).where(TestCase.id.in_(payload.test_case_ids))
+    )
+    test_cases = {case.id: case for case in result.scalars().all()}
+    missing = [case_id for case_id in payload.test_case_ids if case_id not in test_cases]
+    if missing:
+        raise HTTPException(
+            status_code=404, detail=f"Test case(s) not found: {', '.join(map(str, missing))}"
+        )
+
+    created_runs: List[TestRun] = []
+    for case_id in payload.test_case_ids:
+        test_case = test_cases[case_id]
+        prompt = _build_prompt_for_case(test_case, payload.prompt)
+        run = TestRun(
+            test_case_id=test_case.id,
+            model_config_id=model_config_id,
+            status="queued",
+            prompt=prompt,
+            server_url=str(payload.server_url) if payload.server_url else None,
+            xpra_url=str(payload.xpra_url) if payload.xpra_url else None,
+        )
+        session.add(run)
+        created_runs.append(run)
+
+    await session.commit()
+
+    for run in created_runs:
+        await session.refresh(run)
+        await _append_run_log_entry(session, run, "Queued for execution", "info")
+        await run_queue.put(run.id)
+
+    return [_test_run_to_read(run) for run in created_runs]
+
+
+@app.get("/test-runs", response_model=List[TestRunRead])
+async def list_test_runs(session: AsyncSession = Depends(get_db)):
+    result = await session.execute(select(TestRun).order_by(TestRun.created_at.desc()))
+    runs = result.scalars().all()
+    return [_test_run_to_read(run) for run in runs]
+
+
+@app.get("/test-runs/{run_id}", response_model=TestRunRead)
+async def get_test_run(run_id: int, session: AsyncSession = Depends(get_db)):
+    run = await session.get(TestRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Test run not found.")
+    return _test_run_to_read(run)
+
+
+@app.get("/quality-insights", response_model=QualityInsightsResponse)
+async def get_quality_insights(session: AsyncSession = Depends(get_db)):
+    cases_result = await session.execute(select(TestCase))
+    cases = cases_result.scalars().all()
+    runs_result = await session.execute(select(TestRun))
+    runs = runs_result.scalars().all()
+
+    ready_count = sum(1 for case in cases if case.status == "Ready")
+    blocked_count = sum(1 for case in cases if case.status == "Blocked")
+    draft_count = sum(1 for case in cases if case.status == "Draft")
+
+    total_runs = len(runs)
+    pass_count = sum(1 for run in runs if run.result == "success")
+    fail_count = sum(1 for run in runs if run.status == "failed")
+    success_rate = (pass_count / total_runs * 100) if total_runs else 0.0
+
+    durations = []
+    latest_run_at: Optional[datetime] = None
+    for run in runs:
+        metrics = _load_dict(run.metrics)
+        duration = metrics.get("duration")
+        if isinstance(duration, (int, float)):
+            durations.append(float(duration))
+        completed_at = run.completed_at or run.updated_at or run.created_at
+        if completed_at and (
+            latest_run_at is None or completed_at > latest_run_at
+        ):
+            latest_run_at = completed_at
+
+    average_duration = sum(durations) / len(durations) if durations else 0.0
+
+    cases_by_id = {case.id: case for case in cases}
+    category_stats: Dict[str, Dict[str, float]] = {}
+    priority_stats: Dict[str, Dict[str, float]] = {}
+
+    for case in cases:
+        category_key = case.category or "Uncategorized"
+        priority_key = case.priority or "Unspecified"
+        category_stats.setdefault(category_key, {"total": 0, "runs": 0, "pass": 0})
+        priority_stats.setdefault(priority_key, {"total": 0, "runs": 0, "pass": 0})
+        category_stats[category_key]["total"] += 1
+        priority_stats[priority_key]["total"] += 1
+
+    for run in runs:
+        case = cases_by_id.get(run.test_case_id)
+        if case is None:
+            continue
+        category_key = case.category or "Uncategorized"
+        priority_key = case.priority or "Unspecified"
+        category_entry = category_stats.setdefault(category_key, {"total": 0, "runs": 0, "pass": 0})
+        priority_entry = priority_stats.setdefault(priority_key, {"total": 0, "runs": 0, "pass": 0})
+        category_entry["runs"] += 1
+        priority_entry["runs"] += 1
+        if run.result == "success":
+            category_entry["pass"] += 1
+            priority_entry["pass"] += 1
+
+    category_breakdown = [
+        QualityCategoryInsight(
+            key=key,
+            total=int(stats["total"]),
+            pass_rate=(stats["pass"] / stats["runs"] * 100) if stats["runs"] else 0.0,
+        )
+        for key, stats in category_stats.items()
+    ]
+
+    priority_breakdown = [
+        QualityCategoryInsight(
+            key=key,
+            total=int(stats["total"]),
+            pass_rate=(stats["pass"] / stats["runs"] * 100) if stats["runs"] else 0.0,
+        )
+        for key, stats in priority_stats.items()
+    ]
+
+    return QualityInsightsResponse(
+        total_test_cases=len(cases),
+        ready_test_cases=ready_count,
+        blocked_test_cases=blocked_count,
+        draft_test_cases=draft_count,
+        total_runs=total_runs,
+        pass_count=pass_count,
+        fail_count=fail_count,
+        success_rate=success_rate,
+        average_duration=average_duration,
+        latest_run_at=latest_run_at,
+        category_breakdown=category_breakdown,
+        priority_breakdown=priority_breakdown,
+    )
 
 
 async def _safe_redis_call(coro):
