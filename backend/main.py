@@ -225,6 +225,9 @@ class ManagedTask:
         self.session: SessionDefinition | None = None
         self.rendered_prompt: str | None = None
         self.cancel_requested = False
+        self.run_id: int | None = None
+        self.test_case_id: int | None = None
+        self.test_case_reference: str | None = None
 
 
 _tasks: Dict[str, ManagedTask] = {}
@@ -264,6 +267,8 @@ class TaskRequest(BaseModel):
     model_id: Optional[int] = None
     prompt_id: Optional[int] = None
     prompt_text: Optional[str] = None
+    save_to_history: bool = True
+    test_case_id: Optional[int] = None
 
 
 class TestCaseBase(BaseModel):
@@ -644,6 +649,62 @@ async def _append_run_log_entry(
     run.log = json.dumps(log_entries[-200:])
     run.updated_at = datetime.utcnow()
     await session.commit()
+
+
+async def _update_manual_run(
+    run_id: int,
+    *,
+    status: Optional[str] = None,
+    server_url: Optional[str] = None,
+    xpra_url: Optional[str] = None,
+    result: Optional[str] = None,
+) -> None:
+    async with AsyncSessionLocal() as session:
+        run = await session.get(TestRun, run_id)
+        if run is None:
+            return
+
+        changed = False
+        now = datetime.utcnow()
+
+        if status is not None:
+            if run.status != status:
+                run.status = status
+                changed = True
+            run.updated_at = now
+            if status == "running" and run.started_at is None:
+                run.started_at = now
+                changed = True
+            if status in {"completed", "failed", "cancelled"}:
+                run.completed_at = now
+                changed = True
+
+        if server_url is not None and run.server_url != server_url:
+            run.server_url = server_url
+            run.updated_at = now
+            changed = True
+
+        if xpra_url is not None and run.xpra_url != xpra_url:
+            run.xpra_url = xpra_url
+            run.updated_at = now
+            changed = True
+
+        if result is not None and run.result != result:
+            run.result = result
+            run.completed_at = now
+            run.updated_at = now
+            changed = True
+
+        if changed:
+            await session.commit()
+
+
+async def _log_manual_run(run_id: int, message: str, level: str = "info") -> None:
+    async with AsyncSessionLocal() as session:
+        run = await session.get(TestRun, run_id)
+        if run is None:
+            return
+        await _append_run_log_entry(session, run, message, level)
 
 
 async def _initialise_database() -> None:
@@ -1594,6 +1655,17 @@ async def _activate_managed_task(
             "xpraUrl": allocation.xpra_url,
         }
     )
+    if managed_task.run_id is not None:
+        await _update_manual_run(
+            managed_task.run_id,
+            server_url=allocation.server_url,
+            xpra_url=allocation.xpra_url,
+        )
+        await _log_manual_run(
+            managed_task.run_id,
+            f"Assigned MCP session {allocation.identifier}",
+            "info",
+        )
     await managed_task.queue.put(session_payload)
     await _append_task_log(task_id, session_payload)
     managed_task.task = asyncio.create_task(_agent_worker(task_id, managed_task))
@@ -1628,6 +1700,15 @@ async def _agent_worker(task_id: str, managed_task: ManagedTask) -> None:
         ):
             await _append_task_log(task_id, message)
             await managed_task.queue.put(message)
+            if managed_task.run_id is not None:
+                try:
+                    payload = json.loads(message)
+                    msg_text = str(payload.get("message", ""))
+                    msg_type = str(payload.get("type", "info"))
+                except json.JSONDecodeError:
+                    msg_text = message
+                    msg_type = "info"
+                await _log_manual_run(managed_task.run_id, msg_text, msg_type)
     except asyncio.CancelledError:
         managed_task.status = "cancelled"
         await managed_task.queue.put(
@@ -1636,6 +1717,12 @@ async def _agent_worker(task_id: str, managed_task: ManagedTask) -> None:
         await _append_task_log(
             task_id, json.dumps({"type": "cancelled", "message": "Task cancelled."})
         )
+        if managed_task.run_id is not None:
+            await _log_manual_run(
+                managed_task.run_id,
+                "Task cancelled.",
+                "cancelled",
+            )
         raise
     except Exception as exc:  # pragma: no cover - defensive
         managed_task.status = "failed"
@@ -1643,6 +1730,8 @@ async def _agent_worker(task_id: str, managed_task: ManagedTask) -> None:
             json.dumps({"type": "error", "message": str(exc)})
         )
         await _append_task_log(task_id, json.dumps({"type": "error", "message": str(exc)}))
+        if managed_task.run_id is not None:
+            await _log_manual_run(managed_task.run_id, str(exc), "error")
     finally:
         if managed_task.status == "running":
             managed_task.status = "completed"
@@ -1654,10 +1743,24 @@ async def _agent_worker(task_id: str, managed_task: ManagedTask) -> None:
             await managed_task.queue.put(
                 json.dumps({"type": "error", "message": f"Failed to finalize task: {exc}"})
             )
+            if managed_task.run_id is not None:
+                await _log_manual_run(
+                    managed_task.run_id,
+                    f"Failed to finalize task: {exc}",
+                    "error",
+                )
         else:
             if managed_task.status in {"completed", "failed", "cancelled"}:
                 with suppress(Exception):  # pragma: no cover - defensive
                     await _persist_log_file(task_id)
+            if managed_task.run_id is not None:
+                result_value = (
+                    "success" if managed_task.status == "completed" else managed_task.status
+                )
+                await _update_manual_run(
+                    managed_task.run_id,
+                    result=result_value,
+                )
         if managed_task.session is not None:
             with suppress(Exception):  # pragma: no cover - defensive
                 await SESSION_POOL.release(managed_task.session)
@@ -1697,6 +1800,58 @@ async def run_task(request: TaskRequest):
     initial_prompt = _render_task_prompt(task_text, prompt_template)
     managed_task.rendered_prompt = initial_prompt
 
+    if request.save_to_history:
+        async with AsyncSessionLocal() as session:
+            test_case: TestCase | None = None
+            if request.test_case_id is not None:
+                test_case = await session.get(TestCase, request.test_case_id)
+
+            if test_case is None:
+                generated_reference = f"DRAFT-{uuid.uuid4().hex[:6].upper()}"
+                title_source = task_text.splitlines()[0].strip() if task_text.splitlines() else ""
+                title = title_source[:120] if title_source else generated_reference
+                tags = _dump_list(["manual"])
+                steps = _dump_list(
+                    [line.strip() for line in task_text.splitlines() if line.strip()]
+                )
+                test_case = TestCase(
+                    reference=generated_reference,
+                    title=title,
+                    description=task_text,
+                    category="Manual",
+                    priority="Medium",
+                    status="Draft",
+                    tags=tags,
+                    steps=steps,
+                )
+                session.add(test_case)
+                await session.commit()
+                await session.refresh(test_case)
+
+            managed_task.test_case_reference = test_case.reference
+            run_record = TestRun(
+                test_case_id=test_case.id,
+                model_config_id=None,
+                status="draft",
+                prompt=initial_prompt,
+                server_url=None,
+                xpra_url=None,
+                task_id=task_id,
+                log="[]",
+                metrics="{}",
+            )
+            session.add(run_record)
+            await session.commit()
+            await session.refresh(run_record)
+            await _append_run_log_entry(
+                session,
+                run_record,
+                f"Manual run captured for later review (Test Case {test_case.reference}).",
+                "info",
+            )
+            managed_task.run_id = run_record.id
+            managed_task.test_case_id = test_case.id
+
     allocation: SessionDefinition | None = None
     try:
         allocation = await SESSION_POOL.acquire_nowait()
@@ -1716,6 +1871,12 @@ async def run_task(request: TaskRequest):
             )
             await _append_task_log(task_id, waiting_payload)
             await managed_task.queue.put(waiting_payload)
+            if managed_task.run_id is not None:
+                await _log_manual_run(
+                    managed_task.run_id,
+                    "Waiting for available MCP session.",
+                    "info",
+                )
             managed_task.waiter = asyncio.create_task(_await_session(task_id, managed_task))
         else:
             managed_task.status = "running"
@@ -1729,6 +1890,17 @@ async def run_task(request: TaskRequest):
                 server_url=allocation.server_url,
                 xpra_url=allocation.xpra_url,
             )
+            if managed_task.run_id is not None:
+                await _update_manual_run(
+                    managed_task.run_id,
+                    server_url=allocation.server_url,
+                    xpra_url=allocation.xpra_url,
+                )
+                await _log_manual_run(
+                    managed_task.run_id,
+                    f"Assigned MCP session {allocation.identifier}",
+                    "info",
+                )
             await _activate_managed_task(task_id, managed_task, allocation)
             allocation = None  # ownership transferred to managed task
     except RuntimeError as exc:
@@ -1747,6 +1919,9 @@ async def run_task(request: TaskRequest):
                 "status": managed_task.status,
                 "serverUrl": managed_task.server_url,
                 "xpraUrl": managed_task.xpra_url,
+                "runId": managed_task.run_id,
+                "testCaseId": managed_task.test_case_id,
+                "testCaseReference": managed_task.test_case_reference,
             }
         )
         with suppress(Exception):  # pragma: no cover - defensive
