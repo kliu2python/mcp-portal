@@ -804,7 +804,7 @@ function TestCasesTab({
 
       {isRunXpraModalOpen && selectedRun?.xpra_url && (
         <div
-          className="fixed inset-0 z-50 bg-black/80"
+          className="fixed w-4/5 h-4/5 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 bg-black/80"
           role="dialog"
           aria-modal="true"
           onClick={() => setIsRunXpraModalOpen(false)}
@@ -822,7 +822,7 @@ function TestCasesTab({
 
       {isManualXpraModalOpen && taskServerInfo?.xpraUrl && (
         <div
-          className="fixed inset-0 z-50 bg-black/80"
+          className="fixed w-4/5 h-4/5 top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 bg-black/80"
           role="dialog"
           aria-modal="true"
           onClick={() => setIsManualXpraModalOpen(false)}

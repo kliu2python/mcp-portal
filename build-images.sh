@@ -63,7 +63,6 @@ docker build -t "$BACKEND_IMAGE" backend
 
 echo "Building frontend image: ${FRONTEND_IMAGE}"
 docker build \
-  --build-arg REACT_APP_API_BASE_URL="${API_BASE}" \
   -t "$FRONTEND_IMAGE" \
   -f Dockerfile.frontend .
 
