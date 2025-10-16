@@ -6,3 +6,4 @@ mcp-use
 redis
 sqlalchemy
 aiosqlite
+httpx

@@ -20,7 +20,7 @@ COPY . /app
 ENV TASK_LOG_DIR=/app/task_logs \
     PORT=8000
 
-RUN mkdir -p ${TASK_LOG_DIR}
+RUN mkdir -p ${TASK_LOG_DIR} && mkdir -p /app/data
 
 EXPOSE 8000
 

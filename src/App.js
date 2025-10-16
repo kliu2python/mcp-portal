@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   BarChart3,
+  BookOpen,
   CheckCircle,
   ClipboardList,
   Edit3,
@@ -11,6 +12,7 @@ import {
   Plus,
   RefreshCcw,
   Settings,
+  StopCircle,
   Trash2,
   Upload,
   XCircle,
@@ -23,6 +25,7 @@ const tabs = [
   { id: 'quality', label: 'Quality Insights', icon: BarChart3 },
   { id: 'tasks', label: 'Testing Tasks', icon: Activity },
   { id: 'models', label: 'Model Modify', icon: Settings },
+  { id: 'prompts', label: 'Prompt Library', icon: BookOpen },
 ];
 
 const priorities = ['Critical', 'High', 'Medium', 'Low'];
@@ -49,8 +52,8 @@ const emptyModelForm = {
 
 const emptyRunForm = {
   modelConfigId: '',
-  serverUrl: '',
-  xpraUrl: '',
+  promptId: '',
+  promptOverride: '',
   useNewModel: false,
   newModel: {
     name: '',
@@ -58,6 +61,31 @@ const emptyRunForm = {
     description: '',
     parameters: '{\n  "temperature": 0.0\n}',
   },
+};
+
+const emptyPromptForm = {
+  id: null,
+  name: '',
+  description: '',
+  template: '',
+  isSystem: false,
+};
+
+const emptyTaskForm = {
+  task: '',
+  modelId: '',
+  promptId: '',
+  promptText: '',
+};
+
+const emptyLlmForm = {
+  id: null,
+  name: '',
+  baseUrl: '',
+  apiKey: '',
+  modelName: '',
+  description: '',
+  isSystem: false,
 };
 
 const XpraFrame = React.memo(({ src }) => {
@@ -104,15 +132,19 @@ function App() {
   const [activeTab, setActiveTab] = useState('testCases');
   const [testCases, setTestCases] = useState([]);
   const [modelConfigs, setModelConfigs] = useState([]);
+  const [llmModels, setLlmModels] = useState([]);
+  const [prompts, setPrompts] = useState([]);
   const [testRuns, setTestRuns] = useState([]);
   const [qualityInsights, setQualityInsights] = useState(null);
   const [message, setMessage] = useState(null);
   const [isLoading, setIsLoading] = useState({
     testCases: false,
     models: false,
+    llms: false,
     runs: false,
     insights: false,
     queue: false,
+    prompts: false,
   });
   const [testCaseForm, setTestCaseForm] = useState(emptyTestCaseForm);
   const [editingTestCaseId, setEditingTestCaseId] = useState(null);
@@ -120,7 +152,16 @@ function App() {
   const [selectedTestCaseIds, setSelectedTestCaseIds] = useState([]);
   const [runForm, setRunForm] = useState(emptyRunForm);
   const [modelForm, setModelForm] = useState(emptyModelForm);
+  const [promptForm, setPromptForm] = useState(emptyPromptForm);
+  const [llmForm, setLlmForm] = useState(emptyLlmForm);
   const [selectedRunId, setSelectedRunId] = useState(null);
+  const [taskForm, setTaskForm] = useState(emptyTaskForm);
+  const [taskLogs, setTaskLogs] = useState([]);
+  const [taskStatus, setTaskStatus] = useState(null);
+  const [activeTaskId, setActiveTaskId] = useState(null);
+  const [taskServerInfo, setTaskServerInfo] = useState({ serverUrl: '', xpraUrl: '' });
+  const [isTaskStreaming, setIsTaskStreaming] = useState(false);
+  const taskAbortControllerRef = useRef(null);
 
   const showMessage = useCallback((type, text) => {
     setMessage({ type, text });
@@ -161,6 +202,38 @@ function App() {
       showMessage('error', error.message);
     } finally {
       setIsLoading((prev) => ({ ...prev, models: false }));
+    }
+  }, [showMessage]);
+
+  const fetchLlmModels = useCallback(async () => {
+    setIsLoading((prev) => ({ ...prev, llms: true }));
+    try {
+      const response = await fetch(`${API_BASE_URL}/llm-models`);
+      if (!response.ok) {
+        throw new Error('Failed to load LLM models');
+      }
+      const data = await response.json();
+      setLlmModels(data);
+    } catch (error) {
+      showMessage('error', error.message);
+    } finally {
+      setIsLoading((prev) => ({ ...prev, llms: false }));
+    }
+  }, [showMessage]);
+
+  const fetchPrompts = useCallback(async () => {
+    setIsLoading((prev) => ({ ...prev, prompts: true }));
+    try {
+      const response = await fetch(`${API_BASE_URL}/prompts`);
+      if (!response.ok) {
+        throw new Error('Failed to load prompts');
+      }
+      const data = await response.json();
+      setPrompts(data);
+    } catch (error) {
+      showMessage('error', error.message);
+    } finally {
+      setIsLoading((prev) => ({ ...prev, prompts: false }));
     }
   }, [showMessage]);
 
@@ -206,13 +279,30 @@ function App() {
   const refreshAll = useCallback(() => {
     fetchTestCases();
     fetchModelConfigs();
+    fetchLlmModels();
+    fetchPrompts();
     fetchTestRuns();
     fetchQualityInsights();
-  }, [fetchQualityInsights, fetchModelConfigs, fetchTestCases, fetchTestRuns]);
+  }, [
+    fetchLlmModels,
+    fetchPrompts,
+    fetchQualityInsights,
+    fetchModelConfigs,
+    fetchTestCases,
+    fetchTestRuns,
+  ]);
 
   useEffect(() => {
     refreshAll();
   }, [refreshAll]);
+
+  useEffect(() => {
+    return () => {
+      if (taskAbortControllerRef.current) {
+        taskAbortControllerRef.current.abort();
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -375,9 +465,14 @@ function App() {
 
     let payload = {
       test_case_ids: selectedTestCaseIds,
-      server_url: runForm.serverUrl || undefined,
-      xpra_url: runForm.xpraUrl || undefined,
     };
+
+    if (runForm.promptId) {
+      payload = { ...payload, prompt_id: Number(runForm.promptId) };
+    }
+    if (runForm.promptOverride && runForm.promptOverride.trim()) {
+      payload = { ...payload, prompt: runForm.promptOverride.trim() };
+    }
 
     if (runForm.useNewModel) {
       try {
@@ -438,6 +533,7 @@ function App() {
   const groupedRuns = useMemo(() => {
     return {
       running: testRuns.filter((run) => run.status === 'running'),
+      pending: testRuns.filter((run) => run.status === 'pending'),
       queued: testRuns.filter((run) => run.status === 'queued'),
       completed: testRuns.filter((run) => run.status === 'completed'),
       failed: testRuns.filter((run) => run.status === 'failed'),
@@ -510,6 +606,315 @@ function App() {
       fetchModelConfigs();
     } catch (error) {
       showMessage('error', error.message);
+    }
+  };
+
+  const handlePromptSubmit = async (event) => {
+    event.preventDefault();
+    if (!promptForm.name.trim() || !promptForm.template.trim()) {
+      showMessage('info', 'Prompt name and template are required');
+      return;
+    }
+
+    const payload = {
+      name: promptForm.name.trim(),
+      description: promptForm.description.trim() || '',
+      template: promptForm.template,
+    };
+
+    try {
+      const url = promptForm.id
+        ? `${API_BASE_URL}/prompts/${promptForm.id}`
+        : `${API_BASE_URL}/prompts`;
+      const method = promptForm.id ? 'PUT' : 'POST';
+      const response = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || 'Failed to save prompt');
+      }
+      await response.json();
+      showMessage('success', promptForm.id ? 'Updated prompt' : 'Created prompt');
+      setPromptForm(emptyPromptForm);
+      fetchPrompts();
+    } catch (error) {
+      showMessage('error', error.message);
+    }
+  };
+
+  const handlePromptEdit = (prompt) => {
+    setPromptForm({
+      id: prompt.id,
+      name: prompt.name,
+      description: prompt.description || '',
+      template: prompt.template,
+      isSystem: prompt.is_system,
+    });
+  };
+
+  const handlePromptDelete = async (prompt) => {
+    if (prompt.is_system) {
+      showMessage('info', 'System prompts cannot be deleted');
+      return;
+    }
+    if (!window.confirm('Delete this prompt?')) return;
+    try {
+      const response = await fetch(`${API_BASE_URL}/prompts/${prompt.id}`, {
+        method: 'DELETE',
+      });
+      if (!response.ok) {
+        throw new Error('Failed to delete prompt');
+      }
+      showMessage('success', 'Deleted prompt');
+      if (promptForm.id === prompt.id) {
+        setPromptForm(emptyPromptForm);
+      }
+      fetchPrompts();
+    } catch (error) {
+      showMessage('error', error.message);
+    }
+  };
+
+  const handleLlmSubmit = async (event) => {
+    event.preventDefault();
+    if (!llmForm.name.trim() || !llmForm.baseUrl.trim() || !llmForm.modelName.trim()) {
+      showMessage('info', 'Name, base URL, and model name are required');
+      return;
+    }
+
+    const payload = {
+      name: llmForm.name.trim(),
+      base_url: llmForm.baseUrl.trim(),
+      api_key: llmForm.apiKey.trim(),
+      model_name: llmForm.modelName.trim(),
+      description: llmForm.description.trim() || '',
+    };
+
+    if (llmForm.id && !payload.api_key) {
+      delete payload.api_key;
+    }
+
+    try {
+      const url = llmForm.id
+        ? `${API_BASE_URL}/llm-models/${llmForm.id}`
+        : `${API_BASE_URL}/llm-models`;
+      const method = llmForm.id ? 'PUT' : 'POST';
+      const response = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || 'Failed to save LLM model');
+      }
+      await response.json();
+      showMessage('success', llmForm.id ? 'Updated LLM model' : 'Added LLM model');
+      setLlmForm(emptyLlmForm);
+      fetchLlmModels();
+    } catch (error) {
+      showMessage('error', error.message);
+    }
+  };
+
+  const handleLlmEdit = (model) => {
+    if (model.is_system) {
+      showMessage('info', 'System models are managed via configuration');
+      return;
+    }
+    setLlmForm({
+      id: model.id,
+      name: model.name,
+      baseUrl: model.base_url,
+      apiKey: '',
+      modelName: model.model_name,
+      description: model.description || '',
+      isSystem: model.is_system,
+    });
+  };
+
+  const handleLlmDelete = async (model) => {
+    if (model.is_system) {
+      showMessage('info', 'System models cannot be deleted');
+      return;
+    }
+    if (!window.confirm('Delete this LLM model?')) return;
+    try {
+      const response = await fetch(`${API_BASE_URL}/llm-models/${model.id}`, {
+        method: 'DELETE',
+      });
+      if (!response.ok) {
+        throw new Error('Failed to delete LLM model');
+      }
+      showMessage('success', 'Deleted LLM model');
+      if (llmForm.id === model.id) {
+        setLlmForm(emptyLlmForm);
+      }
+      fetchLlmModels();
+    } catch (error) {
+      showMessage('error', error.message);
+    }
+  };
+
+  const handleTaskStart = async (event) => {
+    event.preventDefault();
+    if (!taskForm.task.trim()) {
+      showMessage('info', 'Enter a task description to start');
+      return;
+    }
+    if (isTaskStreaming) {
+      showMessage('info', 'A task is already streaming');
+      return;
+    }
+
+    setTaskLogs([]);
+    setTaskStatus('pending');
+    setActiveTaskId(null);
+    setTaskServerInfo({ serverUrl: '', xpraUrl: '' });
+
+    const payload = {
+      task: taskForm.task.trim(),
+    };
+    if (taskForm.modelId) {
+      payload.model_id = Number(taskForm.modelId);
+    }
+    if (taskForm.promptId) {
+      payload.prompt_id = Number(taskForm.promptId);
+    }
+    if (taskForm.promptText && taskForm.promptText.trim()) {
+      payload.prompt_text = taskForm.promptText.trim();
+    }
+
+    const controller = new AbortController();
+    taskAbortControllerRef.current = controller;
+    setIsTaskStreaming(true);
+
+    let latestStatus = 'pending';
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/run-task`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      if (!response.ok || !response.body) {
+        const errorText = await response.text();
+        throw new Error(errorText || 'Failed to start task');
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        let boundary = buffer.indexOf('\n\n');
+        while (boundary !== -1) {
+          const chunk = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          const dataLines = chunk
+            .split('\n')
+            .filter((line) => line.startsWith('data:'));
+          if (dataLines.length > 0) {
+            const payloadText = dataLines
+              .map((line) => line.slice(6).trim())
+              .join('');
+            if (payloadText === '[DONE]') {
+              if (latestStatus === 'pending') {
+                latestStatus = 'completed';
+              }
+            } else if (payloadText) {
+              try {
+                const eventData = JSON.parse(payloadText);
+                setTaskLogs((prev) => [
+                  ...prev,
+                  { ...eventData, timestamp: new Date().toISOString() },
+                ]);
+                if (eventData.type === 'task') {
+                  setActiveTaskId(eventData.taskId || eventData.task_id || null);
+                  latestStatus = eventData.status || latestStatus;
+                  setTaskStatus(eventData.status || latestStatus);
+                  setTaskServerInfo({
+                    serverUrl: eventData.serverUrl || '',
+                    xpraUrl: eventData.xpraUrl || '',
+                  });
+                } else if (eventData.type === 'session') {
+                  latestStatus = 'running';
+                  setTaskStatus('running');
+                  setTaskServerInfo({
+                    serverUrl: eventData.serverUrl || '',
+                    xpraUrl: eventData.xpraUrl || '',
+                  });
+                } else if (eventData.type === 'success') {
+                  latestStatus = 'completed';
+                  setTaskStatus('completed');
+                } else if (eventData.type === 'error') {
+                  latestStatus = 'failed';
+                  setTaskStatus('failed');
+                } else if (eventData.type === 'cancelled') {
+                  latestStatus = 'cancelled';
+                  setTaskStatus('cancelled');
+                }
+              } catch (parseError) {
+                setTaskLogs((prev) => [
+                  ...prev,
+                  {
+                    type: 'info',
+                    message: payloadText,
+                    timestamp: new Date().toISOString(),
+                  },
+                ]);
+              }
+            }
+          }
+          boundary = buffer.indexOf('\n\n');
+        }
+      }
+
+      setTaskStatus(latestStatus);
+      if (latestStatus === 'completed') {
+        showMessage('success', 'Task completed successfully');
+      } else if (latestStatus === 'cancelled') {
+        showMessage('info', 'Task was cancelled');
+      } else if (latestStatus === 'failed') {
+        showMessage('error', 'Task failed');
+      }
+    } catch (error) {
+      if (error.name !== 'AbortError') {
+        setTaskStatus('failed');
+        showMessage('error', error.message);
+      }
+    } finally {
+      setIsTaskStreaming(false);
+      taskAbortControllerRef.current = null;
+    }
+  };
+
+  const handleTaskCancel = async () => {
+    if (activeTaskId) {
+      try {
+        const response = await fetch(`${API_BASE_URL}/tasks/${activeTaskId}/cancel`, {
+          method: 'POST',
+        });
+        if (!response.ok) {
+          throw new Error('Failed to cancel task');
+        }
+        showMessage('info', 'Cancellation requested');
+      } catch (error) {
+        showMessage('error', error.message);
+      }
+    }
+    if (taskAbortControllerRef.current) {
+      taskAbortControllerRef.current.abort();
+      taskAbortControllerRef.current = null;
     }
   };
 
@@ -791,16 +1196,23 @@ function App() {
                       ))}
                     </select>
                   )}
-                  <input
-                    placeholder="MCP server URL"
-                    value={runForm.serverUrl}
-                    onChange={(event) => handleRunFormChange('serverUrl', event.target.value)}
+                  <select
+                    value={runForm.promptId}
+                    onChange={(event) => handleRunFormChange('promptId', event.target.value)}
                     className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
-                  />
-                  <input
-                    placeholder="Xpra stream URL"
-                    value={runForm.xpraUrl}
-                    onChange={(event) => handleRunFormChange('xpraUrl', event.target.value)}
+                  >
+                    <option value="">Use default prompt</option>
+                    {prompts.map((prompt) => (
+                      <option key={prompt.id} value={prompt.id}>
+                        {prompt.name} {prompt.is_system ? '· System' : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <textarea
+                    rows={3}
+                    placeholder="Optional custom prompt override"
+                    value={runForm.promptOverride}
+                    onChange={(event) => handleRunFormChange('promptOverride', event.target.value)}
                     className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
                   />
                 </div>
@@ -856,11 +1268,143 @@ function App() {
                 )}
               </div>
             </div>
+        </div>
+        <div className="mt-6 rounded-lg border border-slate-700 bg-slate-900/60 p-6">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h3 className="text-lg font-semibold text-purple-200">Manual MCP Task Runner</h3>
+              <p className="text-sm text-gray-400">
+                Launch an ad-hoc MCP task using the shared session pool and optional overrides.
+              </p>
+            </div>
+            {activeTaskId && (
+              <span className="rounded-full border border-slate-700 px-3 py-1 text-xs uppercase tracking-wide text-gray-300">
+                Task ID: {activeTaskId}
+              </span>
+            )}
+          </div>
+          <form onSubmit={handleTaskStart} className="mt-4 space-y-4">
+            <textarea
+              rows={4}
+              required
+              value={taskForm.task}
+              onChange={(event) => setTaskForm((prev) => ({ ...prev, task: event.target.value }))}
+              placeholder="Describe the task for the MCP agent to execute"
+              className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+            />
+            <div className="grid gap-4 md:grid-cols-3">
+              <select
+                value={taskForm.modelId}
+                onChange={(event) => setTaskForm((prev) => ({ ...prev, modelId: event.target.value }))}
+                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+              >
+                <option value="">Use default configured model</option>
+                {llmModels.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.name} ({model.model_name})
+                  </option>
+                ))}
+              </select>
+              <select
+                value={taskForm.promptId}
+                onChange={(event) => setTaskForm((prev) => ({ ...prev, promptId: event.target.value }))}
+                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+              >
+                <option value="">Use default prompt</option>
+                {prompts.map((prompt) => (
+                  <option key={prompt.id} value={prompt.id}>
+                    {prompt.name} {prompt.is_system ? '· System' : ''}
+                  </option>
+                ))}
+              </select>
+              <textarea
+                rows={2}
+                value={taskForm.promptText}
+                onChange={(event) => setTaskForm((prev) => ({ ...prev, promptText: event.target.value }))}
+                placeholder="Optional custom prompt override"
+                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+              />
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="submit"
+                disabled={isTaskStreaming}
+                className="flex items-center gap-2 rounded-md bg-purple-600 px-4 py-2 text-white transition-colors hover:bg-purple-700 disabled:cursor-not-allowed disabled:bg-purple-900/40"
+              >
+                {isTaskStreaming ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                {isTaskStreaming ? 'Running Task' : 'Start Task'}
+              </button>
+              <button
+                type="button"
+                onClick={handleTaskCancel}
+                disabled={!isTaskStreaming && !activeTaskId}
+                className="flex items-center gap-2 rounded-md border border-slate-700 px-4 py-2 text-sm text-gray-200 transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:text-gray-500"
+              >
+                <StopCircle className="h-4 w-4" /> Cancel Task
+              </button>
+            </div>
+          </form>
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <div className="space-y-1 text-sm text-gray-300">
+              <p>
+                Status:{' '}
+                <span className="font-semibold text-purple-200">{taskStatus || 'idle'}</span>
+              </p>
+              <p>
+                MCP Session:{' '}
+                <span className="text-gray-400">{taskServerInfo.serverUrl || 'Waiting'}</span>
+              </p>
+              <p>
+                Xpra Stream:{' '}
+                {taskServerInfo.xpraUrl ? (
+                  <a
+                    href={taskServerInfo.xpraUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-purple-300 underline"
+                  >
+                    Open session
+                  </a>
+                ) : (
+                  <span className="text-gray-400">Waiting</span>
+                )}
+              </p>
+            </div>
+          </div>
+          <div className="mt-4 max-h-64 overflow-auto space-y-2 pr-2">
+            {taskLogs.length === 0 && (
+              <div className="rounded-md border border-slate-700 bg-slate-900/40 px-3 py-2 text-sm text-gray-400">
+                Task output will appear here.
+              </div>
+            )}
+            {taskLogs.map((entry, index) => (
+              <div
+                key={`${entry.timestamp}-${index}`}
+                className={`rounded-md border px-3 py-2 text-sm ${
+                  entry.type === 'error'
+                    ? 'border-rose-500/40 bg-rose-500/10 text-rose-200'
+                    : entry.type === 'success'
+                    ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
+                    : entry.type === 'cancelled'
+                    ? 'border-amber-400/40 bg-amber-500/10 text-amber-200'
+                    : 'border-slate-700 bg-slate-900/40 text-gray-200'
+                }`}
+              >
+                <div className="flex items-center justify-between text-[11px] text-gray-400">
+                  <span>{new Date(entry.timestamp).toLocaleTimeString()}</span>
+                  <span className="uppercase tracking-wide">{entry.type}</span>
+                </div>
+                <p className="mt-1 text-xs">
+                  {typeof entry.message === 'string' ? entry.message : JSON.stringify(entry.message)}
+                </p>
+              </div>
+            ))}
           </div>
         </div>
       </div>
-    );
-  };
+    </div>
+  );
+};
 
   const renderQualityTab = () => {
     if (!qualityInsights) {
@@ -967,7 +1511,7 @@ function App() {
             <RefreshCcw className="h-4 w-4" /> Refresh
           </button>
         </div>
-        {['running', 'queued', 'completed', 'failed'].map((group) => (
+        {['running', 'pending', 'queued', 'completed', 'failed'].map((group) => (
           <div key={group} className="space-y-2">
             <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-400">
               {group}
@@ -1084,50 +1628,278 @@ function App() {
   );
 
   const renderModelsTab = () => (
-    <div className="grid gap-6 lg:grid-cols-2">
+    <div className="space-y-6">
+      <div className="grid gap-6 lg:grid-cols-2">
+        <form
+          onSubmit={handleModelFormSubmit}
+          className="rounded-lg border border-slate-700 bg-slate-900/60 p-6"
+        >
+          <h2 className="mb-4 text-lg font-semibold text-purple-200">
+            {modelForm.id ? 'Edit Model Configuration' : 'Create Model Configuration'}
+          </h2>
+          <div className="space-y-4">
+            <div>
+              <label className="mb-1 block text-sm text-gray-300">Name</label>
+              <input
+                required
+                value={modelForm.name}
+                onChange={(event) => setModelForm((prev) => ({ ...prev, name: event.target.value }))}
+                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm text-gray-300">Provider</label>
+              <input
+                required
+                value={modelForm.provider}
+                onChange={(event) => setModelForm((prev) => ({ ...prev, provider: event.target.value }))}
+                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm text-gray-300">Description</label>
+              <textarea
+                rows={3}
+                value={modelForm.description}
+                onChange={(event) => setModelForm((prev) => ({ ...prev, description: event.target.value }))}
+                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm text-gray-300">Parameters (JSON)</label>
+              <textarea
+                rows={6}
+                value={modelForm.parameters}
+                onChange={(event) => setModelForm((prev) => ({ ...prev, parameters: event.target.value }))}
+                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 font-mono text-sm text-white focus:border-purple-500 focus:outline-none"
+              />
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                type="submit"
+                className="flex items-center gap-2 rounded-md bg-purple-600 px-4 py-2 text-white transition-colors hover:bg-purple-700"
+              >
+                <Upload className="h-4 w-4" />
+                {modelForm.id ? 'Update Model' : 'Create Model'}
+              </button>
+              {modelForm.id && (
+                <button
+                  type="button"
+                  onClick={() => setModelForm(emptyModelForm)}
+                  className="rounded-md border border-slate-700 px-3 py-2 text-sm text-gray-300 hover:bg-slate-800"
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+          </div>
+        </form>
+
+        <div className="space-y-3">
+          {modelConfigs.map((config) => (
+            <div
+              key={config.id}
+              className="rounded-lg border border-slate-700 bg-slate-900/60 p-5"
+            >
+              <div className="flex items-start justify-between">
+                <div>
+                  <h3 className="text-lg font-semibold text-purple-200">{config.name}</h3>
+                  <p className="text-sm text-gray-400">{config.provider}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => handleModelEdit(config)}
+                    className="rounded-md border border-slate-700 p-1 text-gray-300 hover:bg-slate-800"
+                  >
+                    <Edit3 className="h-4 w-4" />
+                  </button>
+                  <button
+                    onClick={() => handleModelDelete(config.id)}
+                    className="rounded-md border border-rose-500/30 p-1 text-rose-200 hover:bg-rose-500/20"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+              <div className="mt-3 space-y-2 text-sm text-gray-300">
+                <p>{config.description || 'No description provided.'}</p>
+                <pre className="max-h-32 overflow-auto rounded-md border border-slate-800 bg-slate-950/60 p-3 text-xs text-gray-300">
+                  {JSON.stringify(config.parameters || {}, null, 2)}
+                </pre>
+              </div>
+            </div>
+          ))}
+          {modelConfigs.length === 0 && (
+            <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-6 text-center text-gray-400">
+              No model configurations yet.
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-2">
+        <form
+          onSubmit={handleLlmSubmit}
+          className="rounded-lg border border-slate-700 bg-slate-900/60 p-6"
+        >
+          <h2 className="mb-4 text-lg font-semibold text-purple-200">
+            {llmForm.id ? 'Edit LLM Connection' : 'Add LLM Connection'}
+          </h2>
+          <div className="space-y-4">
+            <div>
+              <label className="mb-1 block text-sm text-gray-300">Display Name</label>
+              <input
+                required
+                value={llmForm.name}
+                onChange={(event) => setLlmForm((prev) => ({ ...prev, name: event.target.value }))}
+                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm text-gray-300">Base URL</label>
+              <input
+                required
+                value={llmForm.baseUrl}
+                onChange={(event) => setLlmForm((prev) => ({ ...prev, baseUrl: event.target.value }))}
+                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm text-gray-300">API Key</label>
+              <input
+                type="password"
+                value={llmForm.apiKey}
+                onChange={(event) => setLlmForm((prev) => ({ ...prev, apiKey: event.target.value }))}
+                placeholder={llmForm.id ? 'Leave blank to keep existing key' : 'Required'}
+                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm text-gray-300">Model Name</label>
+              <input
+                required
+                value={llmForm.modelName}
+                onChange={(event) => setLlmForm((prev) => ({ ...prev, modelName: event.target.value }))}
+                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm text-gray-300">Description</label>
+              <textarea
+                rows={3}
+                value={llmForm.description}
+                onChange={(event) => setLlmForm((prev) => ({ ...prev, description: event.target.value }))}
+                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+              />
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                type="submit"
+                className="flex items-center gap-2 rounded-md bg-purple-600 px-4 py-2 text-white transition-colors hover:bg-purple-700"
+              >
+                <Upload className="h-4 w-4" />
+                {llmForm.id ? 'Update LLM' : 'Add LLM'}
+              </button>
+              {llmForm.id && (
+                <button
+                  type="button"
+                  onClick={() => setLlmForm(emptyLlmForm)}
+                  className="rounded-md border border-slate-700 px-3 py-2 text-sm text-gray-300 hover:bg-slate-800"
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+          </div>
+        </form>
+
+        <div className="space-y-3">
+          {llmModels.map((model) => (
+            <div
+              key={model.id}
+              className="rounded-lg border border-slate-700 bg-slate-900/60 p-5"
+            >
+              <div className="flex items-start justify-between">
+                <div>
+                  <h3 className="text-lg font-semibold text-purple-200">{model.name}</h3>
+                  <p className="text-sm text-gray-400">{model.model_name}</p>
+                  <p className="text-xs text-gray-500">{model.base_url}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => handleLlmEdit(model)}
+                    disabled={model.is_system}
+                    className="rounded-md border border-slate-700 p-1 text-gray-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:text-gray-500"
+                  >
+                    <Edit3 className="h-4 w-4" />
+                  </button>
+                  <button
+                    onClick={() => handleLlmDelete(model)}
+                    disabled={model.is_system}
+                    className="rounded-md border border-rose-500/30 p-1 text-rose-200 hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:text-rose-300/50"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+              <div className="mt-3 space-y-2 text-sm text-gray-300">
+                <p>{model.description || 'No description provided.'}</p>
+                <p className="text-xs text-gray-400">API Key: {model.masked_api_key || '—'}</p>
+                {model.is_system && (
+                  <span className="inline-flex items-center rounded-full border border-purple-500/50 px-2 py-1 text-[11px] uppercase tracking-wide text-purple-200">
+                    System Default
+                  </span>
+                )}
+              </div>
+            </div>
+          ))}
+          {llmModels.length === 0 && (
+            <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-6 text-center text-gray-400">
+              No LLM connections yet.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderPromptsTab = () => (
+    <div className="space-y-6">
       <form
-        onSubmit={handleModelFormSubmit}
+        onSubmit={handlePromptSubmit}
         className="rounded-lg border border-slate-700 bg-slate-900/60 p-6"
       >
         <h2 className="mb-4 text-lg font-semibold text-purple-200">
-          {modelForm.id ? 'Edit Model Configuration' : 'Create Model Configuration'}
+          {promptForm.id ? 'Edit Prompt Template' : 'Create Prompt Template'}
         </h2>
         <div className="space-y-4">
           <div>
             <label className="mb-1 block text-sm text-gray-300">Name</label>
             <input
               required
-              value={modelForm.name}
-              onChange={(event) => setModelForm((prev) => ({ ...prev, name: event.target.value }))}
-              className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-sm text-gray-300">Provider</label>
-            <input
-              required
-              value={modelForm.provider}
-              onChange={(event) => setModelForm((prev) => ({ ...prev, provider: event.target.value }))}
+              value={promptForm.name}
+              onChange={(event) => setPromptForm((prev) => ({ ...prev, name: event.target.value }))}
               className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
             />
           </div>
           <div>
             <label className="mb-1 block text-sm text-gray-300">Description</label>
-            <textarea
-              rows={3}
-              value={modelForm.description}
-              onChange={(event) => setModelForm((prev) => ({ ...prev, description: event.target.value }))}
+            <input
+              value={promptForm.description}
+              onChange={(event) => setPromptForm((prev) => ({ ...prev, description: event.target.value }))}
               className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
             />
           </div>
           <div>
-            <label className="mb-1 block text-sm text-gray-300">Parameters (JSON)</label>
+            <label className="mb-1 block text-sm text-gray-300">Template</label>
             <textarea
+              required
               rows={6}
-              value={modelForm.parameters}
-              onChange={(event) => setModelForm((prev) => ({ ...prev, parameters: event.target.value }))}
+              value={promptForm.template}
+              onChange={(event) => setPromptForm((prev) => ({ ...prev, template: event.target.value }))}
               className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 font-mono text-sm text-white focus:border-purple-500 focus:outline-none"
             />
+            <p className="mt-1 text-xs text-gray-500">Use {'{task}'} as a placeholder for the task instructions.</p>
           </div>
           <div className="flex items-center gap-3">
             <button
@@ -1135,12 +1907,12 @@ function App() {
               className="flex items-center gap-2 rounded-md bg-purple-600 px-4 py-2 text-white transition-colors hover:bg-purple-700"
             >
               <Upload className="h-4 w-4" />
-              {modelForm.id ? 'Update Model' : 'Create Model'}
+              {promptForm.id ? 'Update Prompt' : 'Create Prompt'}
             </button>
-            {modelForm.id && (
+            {promptForm.id && (
               <button
                 type="button"
-                onClick={() => setModelForm(emptyModelForm)}
+                onClick={() => setPromptForm(emptyPromptForm)}
                 className="rounded-md border border-slate-700 px-3 py-2 text-sm text-gray-300 hover:bg-slate-800"
               >
                 Cancel
@@ -1151,42 +1923,46 @@ function App() {
       </form>
 
       <div className="space-y-3">
-        {modelConfigs.map((config) => (
+        {prompts.map((prompt) => (
           <div
-            key={config.id}
+            key={prompt.id}
             className="rounded-lg border border-slate-700 bg-slate-900/60 p-5"
           >
             <div className="flex items-start justify-between">
               <div>
-                <h3 className="text-lg font-semibold text-purple-200">{config.name}</h3>
-                <p className="text-sm text-gray-400">{config.provider}</p>
+                <h3 className="text-lg font-semibold text-purple-200">{prompt.name}</h3>
+                <p className="text-sm text-gray-400">{prompt.description || 'No description provided.'}</p>
+                {prompt.is_system && (
+                  <span className="mt-1 inline-flex items-center rounded-full border border-purple-500/50 px-2 py-1 text-[11px] uppercase tracking-wide text-purple-200">
+                    System Default
+                  </span>
+                )}
               </div>
               <div className="flex items-center gap-2">
                 <button
-                  onClick={() => handleModelEdit(config)}
-                  className="rounded-md border border-slate-700 p-1 text-gray-300 hover:bg-slate-800"
+                  onClick={() => handlePromptEdit(prompt)}
+                  disabled={prompt.is_system}
+                  className="rounded-md border border-slate-700 p-1 text-gray-300 hover:bg-slate-800 disabled:cursor-not-allowed disabled:text-gray-500"
                 >
                   <Edit3 className="h-4 w-4" />
                 </button>
                 <button
-                  onClick={() => handleModelDelete(config.id)}
-                  className="rounded-md border border-rose-500/30 p-1 text-rose-200 hover:bg-rose-500/20"
+                  onClick={() => handlePromptDelete(prompt)}
+                  disabled={prompt.is_system}
+                  className="rounded-md border border-rose-500/30 p-1 text-rose-200 hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:text-rose-300/50"
                 >
                   <Trash2 className="h-4 w-4" />
                 </button>
               </div>
             </div>
-            <div className="mt-3 space-y-2 text-sm text-gray-300">
-              <p>{config.description || 'No description provided.'}</p>
-              <pre className="max-h-32 overflow-auto rounded-md border border-slate-800 bg-slate-950/60 p-3 text-xs text-gray-300">
-                {JSON.stringify(config.parameters || {}, null, 2)}
-              </pre>
-            </div>
+            <pre className="mt-3 max-h-40 overflow-auto rounded-md border border-slate-800 bg-slate-950/60 p-3 text-xs text-gray-300">
+              {prompt.template}
+            </pre>
           </div>
         ))}
-        {modelConfigs.length === 0 && (
+        {prompts.length === 0 && (
           <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-6 text-center text-gray-400">
-            No model configurations yet.
+            No prompts available yet.
           </div>
         )}
       </div>
@@ -1203,6 +1979,8 @@ function App() {
         return renderTasksTab();
       case 'models':
         return renderModelsTab();
+      case 'prompts':
+        return renderPromptsTab();
       default:
         return null;
     }

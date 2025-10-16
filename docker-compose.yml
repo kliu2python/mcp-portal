@@ -16,6 +16,7 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       TASK_LOG_DIR: /app/task_logs
+      DATABASE_FILE: /app/data/data.db
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-changeme}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
@@ -23,6 +24,7 @@ services:
       - "8000:8000"
     volumes:
       - backend-logs:/app/task_logs
+      - backend-data:/app/data
     depends_on:
       - redis
 
@@ -40,3 +42,4 @@ services:
 volumes:
   redis-data:
   backend-logs:
+  backend-data:
