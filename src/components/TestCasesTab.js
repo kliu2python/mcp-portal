@@ -756,6 +756,16 @@ function TestCasesTab({
                         ? entry.message
                         : JSON.stringify(entry.message)}
                     </p>
+                    {entry.details && (
+                      <details className="mt-2 text-xs">
+                        <summary className="cursor-pointer text-gray-400 hover:text-gray-200">
+                          Event payload
+                        </summary>
+                        <pre className="mt-1 max-h-48 overflow-auto rounded-md border border-slate-800 bg-slate-950/60 p-2 text-[11px] text-gray-300">
+                          {JSON.stringify(entry.details, null, 2)}
+                        </pre>
+                      </details>
+                    )}
                   </div>
                 ))}
               </div>

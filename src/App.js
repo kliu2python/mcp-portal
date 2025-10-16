@@ -96,6 +96,8 @@ function App() {
   const [isTaskStreaming, setIsTaskStreaming] = useState(false);
   const [testCaseView, setTestCaseView] = useState('catalog');
   const [isSavingLlm, setIsSavingLlm] = useState(false);
+  const [isTestingLlm, setIsTestingLlm] = useState(false);
+  const [llmTestStatus, setLlmTestStatus] = useState({ state: 'idle', message: '' });
   const [isTestCaseModalOpen, setIsTestCaseModalOpen] = useState(false);
   const [manualRunRecord, setManualRunRecord] = useState(null);
   const taskAbortControllerRef = useRef(null);
@@ -103,6 +105,22 @@ function App() {
   const showMessage = useCallback((type, text) => {
     setMessage({ type, text });
   }, []);
+
+  const isLlmFormComplete = useMemo(
+    () =>
+      Boolean(
+        llmForm.name.trim() &&
+          llmForm.baseUrl.trim() &&
+          llmForm.modelName.trim() &&
+          (llmForm.id || llmForm.apiKey.trim())
+      ),
+    [llmForm.baseUrl, llmForm.apiKey, llmForm.id, llmForm.modelName, llmForm.name]
+  );
+
+  const canSubmitLlm = useMemo(
+    () => Boolean(isLlmFormComplete && (llmForm.id || llmTestStatus.state === 'success')),
+    [isLlmFormComplete, llmForm.id, llmTestStatus.state]
+  );
 
   useEffect(() => {
     if (!message) return;
@@ -622,6 +640,49 @@ function App() {
 
   const handleLlmFormChange = (field, value) => {
     setLlmForm((prev) => ({ ...prev, [field]: value }));
+    if (['baseUrl', 'apiKey', 'modelName'].includes(field)) {
+      setLlmTestStatus((prev) => (prev.state === 'idle' ? prev : { state: 'idle', message: '' }));
+    }
+  };
+
+  const handleLlmFormReset = () => {
+    setLlmForm(emptyLlmForm);
+    setLlmTestStatus({ state: 'idle', message: '' });
+  };
+
+  const handleLlmTest = async () => {
+    if (!llmForm.baseUrl.trim() || !llmForm.modelName.trim()) {
+      showMessage('info', 'Base URL and model name are required before testing');
+      return;
+    }
+    if (!llmForm.apiKey.trim()) {
+      showMessage('info', 'Enter an API key before testing the connection');
+      return;
+    }
+
+    try {
+      setIsTestingLlm(true);
+      setLlmTestStatus({ state: 'pending', message: 'Testing connection…' });
+      const response = await fetch(`${API_BASE_URL}/llm-models/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          base_url: llmForm.baseUrl.trim(),
+          api_key: llmForm.apiKey.trim(),
+          model_name: llmForm.modelName.trim(),
+        }),
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || 'Unable to verify LLM connection');
+      }
+      setLlmTestStatus({ state: 'success', message: 'Connection verified successfully' });
+    } catch (error) {
+      setLlmTestStatus({ state: 'error', message: error.message });
+      showMessage('error', error.message);
+    } finally {
+      setIsTestingLlm(false);
+    }
   };
 
   const handleLlmSubmit = async (event) => {
@@ -632,6 +693,10 @@ function App() {
     }
     if (!llmForm.id && !llmForm.apiKey.trim()) {
       showMessage('info', 'API key is required for a new LLM connection');
+      return;
+    }
+    if (!llmForm.id && llmTestStatus.state !== 'success') {
+      showMessage('info', 'Test the connection before saving a new LLM');
       return;
     }
 
@@ -681,6 +746,7 @@ function App() {
       await response.json();
       showMessage('success', llmForm.id ? 'Updated LLM model' : 'Added LLM model');
       setLlmForm(emptyLlmForm);
+      setLlmTestStatus({ state: 'idle', message: '' });
       fetchLlmModels();
     } catch (error) {
       showMessage('error', error.message);
@@ -703,6 +769,7 @@ function App() {
       description: model.description || '',
       isSystem: model.is_system,
     });
+    setLlmTestStatus({ state: 'idle', message: '' });
   };
 
   const handleLlmDelete = async (model) => {
@@ -997,11 +1064,15 @@ function App() {
               onSubmitLlm={handleLlmSubmit}
               llmForm={llmForm}
               onLlmFormChange={handleLlmFormChange}
-              onLlmFormReset={() => setLlmForm(emptyLlmForm)}
+              onLlmFormReset={handleLlmFormReset}
               isSavingLlm={isSavingLlm}
               llmModels={llmModels}
               onLlmEdit={handleLlmEdit}
               onLlmDelete={handleLlmDelete}
+              onTestLlm={handleLlmTest}
+              isTestingLlm={isTestingLlm}
+              llmTestStatus={llmTestStatus}
+              canSubmitLlm={canSubmitLlm}
             />
           )}
           {activeTab === 'prompts' && (
