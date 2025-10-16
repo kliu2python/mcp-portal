@@ -242,7 +242,9 @@ class TestRunRead(BaseModel):
 class TestRunRequest(BaseModel):
     test_case_ids: List[int] = Field(..., min_items=1)
     model_config_id: Optional[int] = None
-    model_config: Optional[ModelConfigCreate] = None
+    model_config_payload: Optional[ModelConfigCreate] = Field(
+        default=None, alias="model_config"
+    )
     server_url: Optional[HttpUrl] = None
     xpra_url: Optional[HttpUrl] = None
     prompt: Optional[str] = None
@@ -669,19 +671,22 @@ def _build_prompt_for_case(test_case: TestCase, override_prompt: Optional[str]) 
 async def queue_test_runs(
     payload: TestRunRequest, session: AsyncSession = Depends(get_db)
 ):
-    if payload.model_config_id is None and payload.model_config is None:
+    if (
+        payload.model_config_id is None
+        and payload.model_config_payload is None
+    ):
         raise HTTPException(
             status_code=400, detail="Provide model_config_id or model_config payload."
         )
 
     model_config_id = payload.model_config_id
     created_config: Optional[ModelConfig] = None
-    if payload.model_config is not None:
+    if payload.model_config_payload is not None:
         created_config = ModelConfig(
-            name=payload.model_config.name,
-            provider=payload.model_config.provider,
-            description=payload.model_config.description,
-            parameters=_dump_dict(payload.model_config.parameters),
+            name=payload.model_config_payload.name,
+            provider=payload.model_config_payload.provider,
+            description=payload.model_config_payload.description,
+            parameters=_dump_dict(payload.model_config_payload.parameters),
         )
         session.add(created_config)
         await session.commit()
