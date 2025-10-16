@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   Activity,
   ClipboardList,
@@ -54,6 +54,33 @@ function TestCasesTab({
 }) {
   const [isRunXpraModalOpen, setIsRunXpraModalOpen] = useState(false);
   const [isManualXpraModalOpen, setIsManualXpraModalOpen] = useState(false);
+
+  const openXpraWindow = useCallback((url) => {
+    if (!url) {
+      return;
+    }
+
+    const { screen: screenInfo } = window;
+    const availableWidth = screenInfo?.availWidth ?? window.innerWidth ?? 1600;
+    const availableHeight = screenInfo?.availHeight ?? window.innerHeight ?? 900;
+    const width = Math.max(1024, Math.min(availableWidth, 1600));
+    const height = Math.max(768, Math.min(availableHeight, 1000));
+    const left = Math.max(0, Math.round((availableWidth - width) / 2));
+    const top = Math.max(0, Math.round((availableHeight - height) / 2));
+
+    const features = [
+      'noopener',
+      'noreferrer',
+      'resizable=yes',
+      'scrollbars=yes',
+      `width=${Math.round(width)}`,
+      `height=${Math.round(height)}`,
+      `left=${left}`,
+      `top=${top}`,
+    ].join(',');
+
+    window.open(url, '_blank', features);
+  }, []);
 
   useEffect(() => {
     if (view !== 'history') {
@@ -413,7 +440,7 @@ function TestCasesTab({
                         </button>
                         <button
                           type="button"
-                          onClick={() => selectedRun?.xpra_url && window.open(selectedRun.xpra_url, '_blank', 'noopener,noreferrer')}
+                          onClick={() => openXpraWindow(selectedRun?.xpra_url)}
                           disabled={!selectedRun?.xpra_url}
                           className="rounded border border-slate-600 px-2 py-1 text-gray-200 transition hover:border-purple-400 hover:text-purple-200 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
                         >
@@ -641,7 +668,7 @@ function TestCasesTab({
                     </button>
                     <button
                       type="button"
-                      onClick={() => taskServerInfo?.xpraUrl && window.open(taskServerInfo.xpraUrl, '_blank', 'noopener,noreferrer')}
+                      onClick={() => openXpraWindow(taskServerInfo?.xpraUrl)}
                       disabled={!taskServerInfo?.xpraUrl}
                       className="rounded border border-slate-600 px-2 py-1 text-gray-200 transition hover:border-purple-400 hover:text-purple-200 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
                     >
