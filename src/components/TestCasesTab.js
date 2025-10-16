@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   ClipboardList,
   Edit3,
   Loader2,
+  ChevronDown,
   Monitor,
   Play,
   Plus,
@@ -54,6 +55,14 @@ function TestCasesTab({
 }) {
   const [isRunXpraModalOpen, setIsRunXpraModalOpen] = useState(false);
   const [isManualXpraModalOpen, setIsManualXpraModalOpen] = useState(false);
+  const runGroupOrder = useMemo(
+    () => ['draft', 'running', 'pending', 'queued', 'completed', 'failed'],
+    []
+  );
+  const [expandedRunGroup, setExpandedRunGroup] = useState(() => {
+    const initialGroup = runGroupOrder.find((status) => (groupedRuns?.[status] ?? []).length > 0);
+    return initialGroup ?? runGroupOrder[0];
+  });
 
   const openXpraWindow = useCallback((url) => {
     if (!url) {
@@ -63,8 +72,8 @@ function TestCasesTab({
     const { screen: screenInfo } = window;
     const availableWidth = screenInfo?.availWidth ?? window.innerWidth ?? 1600;
     const availableHeight = screenInfo?.availHeight ?? window.innerHeight ?? 900;
-    const width = Math.max(1024, Math.min(availableWidth, 1600));
-    const height = Math.max(768, Math.min(availableHeight, 1000));
+    const width = Math.max(1280, Math.min(availableWidth - 40, 1920));
+    const height = Math.max(900, Math.min(availableHeight - 60, 1200));
     const left = Math.max(0, Math.round((availableWidth - width) / 2));
     const top = Math.max(0, Math.round((availableHeight - height) / 2));
 
@@ -79,7 +88,33 @@ function TestCasesTab({
       `top=${top}`,
     ].join(',');
 
-    window.open(url, '_blank', features);
+    const popup = window.open('', '_blank', features);
+
+    if (popup) {
+      popup.opener = null;
+      popup.location.replace(url);
+
+      if (typeof popup.resizeTo === 'function') {
+        try {
+          popup.resizeTo(Math.round(width), Math.round(height));
+        } catch (error) {
+          // Ignore resize errors from blocked browsers
+        }
+      }
+
+      if (typeof popup.moveTo === 'function') {
+        try {
+          popup.moveTo(left, top);
+        } catch (error) {
+          // Ignore move errors from blocked browsers
+        }
+      }
+
+      popup.focus?.();
+      return;
+    }
+
+    window.open(url, '_blank', 'noopener,noreferrer');
   }, []);
 
   useEffect(() => {
@@ -132,6 +167,29 @@ function TestCasesTab({
     { id: 'history', label: 'Run History', icon: Activity },
     { id: 'manual', label: 'Manual Run', icon: Play },
   ];
+
+  useEffect(() => {
+    if (expandedRunGroup === '') {
+      return;
+    }
+
+    const hasExpandedGroup = runGroupOrder.includes(expandedRunGroup);
+    if (!hasExpandedGroup) {
+      setExpandedRunGroup(runGroupOrder[0]);
+      return;
+    }
+
+    if ((groupedRuns?.[expandedRunGroup] ?? []).length > 0) {
+      return;
+    }
+
+    const fallbackGroup = runGroupOrder.find((status) => (groupedRuns?.[status] ?? []).length > 0);
+    if (fallbackGroup) {
+      setExpandedRunGroup(fallbackGroup);
+    } else {
+      setExpandedRunGroup('');
+    }
+  }, [expandedRunGroup, groupedRuns, runGroupOrder]);
 
   return (
     <div className="space-y-6">
@@ -360,33 +418,87 @@ function TestCasesTab({
                 <RefreshCcw className="h-4 w-4" /> Refresh
               </button>
             </div>
-            {['draft', 'running', 'pending', 'queued', 'completed', 'failed'].map((group) => (
-              <div key={group} className="space-y-2">
-                <h4 className="text-sm font-semibold uppercase tracking-wide text-gray-400">{group}</h4>
-                {groupedRuns[group].map((run) => (
+            {runGroupOrder.map((group) => {
+              const runs = groupedRuns?.[group] ?? [];
+              const isExpanded = expandedRunGroup === group;
+              const runCount = runs.length;
+
+              return (
+                <div key={group} className="rounded-md border border-slate-800 bg-slate-950/40">
                   <button
-                    key={run.id}
-                    onClick={() => onSelectRun(run.id)}
-                    className={`w-full rounded-md border px-4 py-3 text-left transition-colors ${
-                      selectedRunId === run.id
-                        ? 'border-purple-500 bg-purple-500/20'
-                        : 'border-slate-700 bg-slate-900/50 hover:border-purple-400/40'
+                    type="button"
+                    onClick={() =>
+                      setExpandedRunGroup((current) => (current === group ? '' : group))
+                    }
+                    className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
+                    aria-expanded={isExpanded}
+                    aria-controls={`run-group-${group}`}
+                  >
+                    <div className="flex flex-col">
+                      <span className="text-sm font-semibold uppercase tracking-wide text-gray-300">
+                        {group}
+                      </span>
+                      <span className="text-xs text-gray-500">
+                        {runCount === 1 ? '1 run' : `${runCount} runs`}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`rounded-full border px-2 py-0.5 text-xs ${
+                          runCount > 0
+                            ? 'border-purple-500/40 bg-purple-500/10 text-purple-200'
+                            : 'border-slate-700 bg-slate-900/60 text-gray-400'
+                        }`}
+                      >
+                        {runCount}
+                      </span>
+                      <ChevronDown
+                        className={`h-4 w-4 text-gray-400 transition-transform ${
+                          isExpanded ? 'rotate-180' : ''
+                        }`}
+                        aria-hidden="true"
+                      />
+                    </div>
+                  </button>
+                  <div
+                    id={`run-group-${group}`}
+                    className={`overflow-hidden transition-[max-height] duration-300 ease-in-out ${
+                      isExpanded ? 'max-h-96' : 'max-h-0'
                     }`}
                   >
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-semibold text-gray-200">Run #{run.id}</span>
-                      <span className="text-xs text-gray-400">{run.status}</span>
+                    <div
+                      className={`space-y-2 px-4 ${
+                        isExpanded ? 'overflow-y-auto pb-4 pt-3' : ''
+                      }`}
+                      style={isExpanded ? { maxHeight: '22rem' } : undefined}
+                    >
+                      {runs.map((run) => (
+                        <button
+                          key={run.id}
+                          onClick={() => onSelectRun(run.id)}
+                          className={`w-full rounded-md border px-4 py-3 text-left transition-colors ${
+                            selectedRunId === run.id
+                              ? 'border-purple-500 bg-purple-500/20'
+                              : 'border-slate-700 bg-slate-900/50 hover:border-purple-400/40'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm font-semibold text-gray-200">Run #{run.id}</span>
+                            <span className="text-xs text-gray-400">{run.status}</span>
+                          </div>
+                          <p className="mt-1 text-xs text-gray-400">Task #{run.test_case_id}</p>
+                        </button>
+                      ))}
+                      {runs.length === 0 && (
+                        <div className="rounded-md border border-slate-700 bg-slate-900/40 px-4 py-3 text-sm text-gray-400">
+                          None
+                        </div>
+                      )}
                     </div>
-                    <p className="mt-1 text-xs text-gray-400">Task #{run.test_case_id}</p>
-                  </button>
-                ))}
-                {groupedRuns[group].length === 0 && (
-                  <div className="rounded-md border border-slate-700 bg-slate-900/40 px-4 py-3 text-sm text-gray-400">
-                    None
                   </div>
-                )}
-              </div>
-            ))}
+                </div>
+              );
+            })}
           </div>
           <div className="lg:col-span-2">
             {selectedRun ? (
