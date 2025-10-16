@@ -21,10 +21,9 @@ import {
 const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:8000';
 
 const tabs = [
-  { id: 'testCases', label: 'Test Case Management', icon: ClipboardList },
+  { id: 'testCases', label: 'MCP Task Hub', icon: ClipboardList },
   { id: 'quality', label: 'Quality Insights', icon: BarChart3 },
-  { id: 'tasks', label: 'Testing Tasks', icon: Activity },
-  { id: 'models', label: 'Model Modify', icon: Settings },
+  { id: 'models', label: 'Connections', icon: Settings },
   { id: 'prompts', label: 'Prompt Library', icon: BookOpen },
 ];
 
@@ -42,25 +41,9 @@ const emptyTestCaseForm = {
   steps: '',
 };
 
-const emptyModelForm = {
-  id: null,
-  name: '',
-  provider: '',
-  description: '',
-  parameters: '{\n  "temperature": 0.0\n}',
-};
-
 const emptyRunForm = {
-  modelConfigId: '',
   promptId: '',
   promptOverride: '',
-  useNewModel: false,
-  newModel: {
-    name: '',
-    provider: '',
-    description: '',
-    parameters: '{\n  "temperature": 0.0\n}',
-  },
 };
 
 const emptyPromptForm = {
@@ -73,7 +56,6 @@ const emptyPromptForm = {
 
 const emptyTaskForm = {
   task: '',
-  modelId: '',
   promptId: '',
   promptText: '',
 };
@@ -151,7 +133,6 @@ function App() {
   const [testCaseSearch, setTestCaseSearch] = useState('');
   const [selectedTestCaseIds, setSelectedTestCaseIds] = useState([]);
   const [runForm, setRunForm] = useState(emptyRunForm);
-  const [modelForm, setModelForm] = useState(emptyModelForm);
   const [promptForm, setPromptForm] = useState(emptyPromptForm);
   const [llmForm, setLlmForm] = useState(emptyLlmForm);
   const [selectedRunId, setSelectedRunId] = useState(null);
@@ -161,6 +142,8 @@ function App() {
   const [activeTaskId, setActiveTaskId] = useState(null);
   const [taskServerInfo, setTaskServerInfo] = useState({ serverUrl: '', xpraUrl: '' });
   const [isTaskStreaming, setIsTaskStreaming] = useState(false);
+  const [testCaseView, setTestCaseView] = useState('catalog');
+  const [isSavingLlm, setIsSavingLlm] = useState(false);
   const taskAbortControllerRef = useRef(null);
 
   const showMessage = useCallback((type, text) => {
@@ -459,12 +442,18 @@ function App() {
 
   const handleRunQueue = async () => {
     if (selectedTestCaseIds.length === 0) {
-      showMessage('info', 'Select at least one test case to run');
+      showMessage('info', 'Select at least one task to run');
+      return;
+    }
+
+    if (!defaultModelConfig) {
+      showMessage('error', 'No default model configuration is available.');
       return;
     }
 
     let payload = {
       test_case_ids: selectedTestCaseIds,
+      model_config_id: Number(defaultModelConfig.id),
     };
 
     if (runForm.promptId) {
@@ -472,33 +461,6 @@ function App() {
     }
     if (runForm.promptOverride && runForm.promptOverride.trim()) {
       payload = { ...payload, prompt: runForm.promptOverride.trim() };
-    }
-
-    if (runForm.useNewModel) {
-      try {
-        const parameters = JSON.parse(runForm.newModel.parameters || '{}');
-        payload = {
-          ...payload,
-          model_config: {
-            name: runForm.newModel.name,
-            provider: runForm.newModel.provider,
-            description: runForm.newModel.description,
-            parameters,
-          },
-        };
-      } catch (error) {
-        showMessage('error', 'Model parameters must be valid JSON');
-        return;
-      }
-    } else {
-      if (!runForm.modelConfigId) {
-        showMessage('info', 'Select a model configuration or create a new one');
-        return;
-      }
-      payload = {
-        ...payload,
-        model_config_id: Number(runForm.modelConfigId),
-      };
     }
 
     setIsLoading((prev) => ({ ...prev, queue: true }));
@@ -540,74 +502,23 @@ function App() {
     };
   }, [testRuns]);
 
-  const handleModelFormSubmit = async (event) => {
-    event.preventDefault();
-    let parameters;
-    try {
-      parameters = JSON.parse(modelForm.parameters || '{}');
-    } catch (error) {
-      showMessage('error', 'Model parameters must be valid JSON');
-      return;
+  const defaultModelConfig = useMemo(() => {
+    if (modelConfigs.length === 0) {
+      return null;
     }
-
-    const payload = {
-      name: modelForm.name,
-      provider: modelForm.provider,
-      description: modelForm.description,
-      parameters,
-    };
-
-    try {
-      const url = modelForm.id
-        ? `${API_BASE_URL}/model-configs/${modelForm.id}`
-        : `${API_BASE_URL}/model-configs`;
-      const method = modelForm.id ? 'PUT' : 'POST';
-      const response = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(errorText || 'Failed to save model configuration');
-      }
-      await response.json();
-      showMessage('success', modelForm.id ? 'Updated model configuration' : 'Created model configuration');
-      setModelForm(emptyModelForm);
-      fetchModelConfigs();
-    } catch (error) {
-      showMessage('error', error.message);
+    const explicitDefault = modelConfigs.find((config) => config.is_default);
+    if (explicitDefault) {
+      return explicitDefault;
     }
-  };
+    return modelConfigs[modelConfigs.length - 1];
+  }, [modelConfigs]);
 
-  const handleModelEdit = (config) => {
-    setModelForm({
-      id: config.id,
-      name: config.name,
-      provider: config.provider,
-      description: config.description || '',
-      parameters: JSON.stringify(config.parameters || {}, null, 2),
-    });
-  };
-
-  const handleModelDelete = async (configId) => {
-    if (!window.confirm('Delete this model configuration?')) return;
-    try {
-      const response = await fetch(`${API_BASE_URL}/model-configs/${configId}`, {
-        method: 'DELETE',
-      });
-      if (!response.ok) {
-        throw new Error('Failed to delete model configuration');
-      }
-      showMessage('success', 'Deleted model configuration');
-      if (modelForm.id === configId) {
-        setModelForm(emptyModelForm);
-      }
-      fetchModelConfigs();
-    } catch (error) {
-      showMessage('error', error.message);
+  const defaultLlmModel = useMemo(() => {
+    if (llmModels.length === 0) {
+      return null;
     }
-  };
+    return llmModels.find((model) => model.is_system) || llmModels[0];
+  }, [llmModels]);
 
   const handlePromptSubmit = async (event) => {
     event.preventDefault();
@@ -684,6 +595,10 @@ function App() {
       showMessage('info', 'Name, base URL, and model name are required');
       return;
     }
+    if (!llmForm.id && !llmForm.apiKey.trim()) {
+      showMessage('info', 'API key is required for a new LLM connection');
+      return;
+    }
 
     const payload = {
       name: llmForm.name.trim(),
@@ -698,6 +613,23 @@ function App() {
     }
 
     try {
+      setIsSavingLlm(true);
+      if (!llmForm.id) {
+        const verifyResponse = await fetch(`${API_BASE_URL}/llm-models/verify`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            base_url: payload.base_url,
+            api_key: payload.api_key,
+            model_name: payload.model_name,
+          }),
+        });
+        if (!verifyResponse.ok) {
+          const errorText = await verifyResponse.text();
+          throw new Error(errorText || 'Unable to verify LLM connection');
+        }
+      }
+
       const url = llmForm.id
         ? `${API_BASE_URL}/llm-models/${llmForm.id}`
         : `${API_BASE_URL}/llm-models`;
@@ -717,6 +649,8 @@ function App() {
       fetchLlmModels();
     } catch (error) {
       showMessage('error', error.message);
+    } finally {
+      setIsSavingLlm(false);
     }
   };
 
@@ -765,6 +699,10 @@ function App() {
       showMessage('info', 'Enter a task description to start');
       return;
     }
+    if (!defaultLlmModel) {
+      showMessage('error', 'Add a default LLM connection before launching tasks');
+      return;
+    }
     if (isTaskStreaming) {
       showMessage('info', 'A task is already streaming');
       return;
@@ -778,9 +716,6 @@ function App() {
     const payload = {
       task: taskForm.task.trim(),
     };
-    if (taskForm.modelId) {
-      payload.model_id = Number(taskForm.modelId);
-    }
     if (taskForm.promptId) {
       payload.prompt_id = Number(taskForm.promptId);
     }
@@ -923,279 +858,312 @@ function App() {
       filteredTestCases.length > 0 &&
       filteredTestCases.every((testCase) => selectedTestCaseIds.includes(testCase.id));
 
+    const viewTabs = [
+      { id: 'catalog', label: 'Task Catalog', icon: ClipboardList },
+      { id: 'history', label: 'Run History', icon: Activity },
+      { id: 'manual', label: 'Manual Run', icon: Play },
+    ];
+
     return (
       <div className="space-y-6">
-        <div className="flex flex-col gap-4 lg:flex-row">
-          <form
-            onSubmit={handleTestCaseSubmit}
-            className="w-full rounded-lg border border-slate-700 bg-slate-900/60 p-6 lg:w-1/3"
-          >
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-purple-200">
-                {editingTestCaseId ? 'Edit Test Case' : 'Create Test Case'}
-              </h2>
-              {editingTestCaseId && (
+        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+          <div>
+            <h2 className="text-2xl font-semibold text-purple-200">Unified MCP Tasks</h2>
+            <p className="text-sm text-gray-400">
+              Curate scenarios, queue executions, and inspect history from a single workspace.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {viewTabs.map((tab) => {
+              const Icon = tab.icon;
+              const isActive = testCaseView === tab.id;
+              return (
                 <button
-                  type="button"
-                  onClick={resetTestCaseForm}
-                  className="rounded-md border border-slate-700 px-3 py-1 text-sm text-gray-300 hover:bg-slate-800"
+                  key={tab.id}
+                  onClick={() => setTestCaseView(tab.id)}
+                  className={`flex items-center gap-2 rounded-md px-4 py-2 text-sm transition-colors ${
+                    isActive
+                      ? 'bg-purple-600 text-white'
+                      : 'border border-slate-700 bg-slate-900/60 text-gray-300 hover:border-purple-500/50'
+                  }`}
                 >
-                  Cancel
+                  <Icon className="h-4 w-4" />
+                  {tab.label}
                 </button>
-              )}
-            </div>
-            <div className="space-y-4">
-              <div>
-                <label className="mb-1 block text-sm text-gray-300">Reference</label>
-                <input
-                  required
-                  value={testCaseForm.reference}
-                  onChange={(event) => handleTestCaseFieldChange('reference', event.target.value)}
-                  className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-sm text-gray-300">Title</label>
-                <input
-                  required
-                  value={testCaseForm.title}
-                  onChange={(event) => handleTestCaseFieldChange('title', event.target.value)}
-                  className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-sm text-gray-300">Description</label>
-                <textarea
-                  rows={3}
-                  value={testCaseForm.description}
-                  onChange={(event) => handleTestCaseFieldChange('description', event.target.value)}
-                  className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="mb-1 block text-sm text-gray-300">Category</label>
-                  <input
-                    value={testCaseForm.category}
-                    onChange={(event) => handleTestCaseFieldChange('category', event.target.value)}
-                    className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-sm text-gray-300">Priority</label>
-                  <select
-                    value={testCaseForm.priority}
-                    onChange={(event) => handleTestCaseFieldChange('priority', event.target.value)}
-                    className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
-                  >
-                    {priorities.map((priority) => (
-                      <option key={priority} value={priority}>
-                        {priority}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="mb-1 block text-sm text-gray-300">Status</label>
-                  <select
-                    value={testCaseForm.status}
-                    onChange={(event) => handleTestCaseFieldChange('status', event.target.value)}
-                    className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
-                  >
-                    {statuses.map((status) => (
-                      <option key={status} value={status}>
-                        {status}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="mb-1 block text-sm text-gray-300">Tags</label>
-                  <input
-                    value={testCaseForm.tags}
-                    onChange={(event) => handleTestCaseFieldChange('tags', event.target.value)}
-                    placeholder="Smoke, regression"
-                    className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="mb-1 block text-sm text-gray-300">Steps (one per line)</label>
-                <textarea
-                  rows={4}
-                  value={testCaseForm.steps}
-                  onChange={(event) => handleTestCaseFieldChange('steps', event.target.value)}
-                  className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
-                />
-              </div>
-              <button
-                type="submit"
-                className="flex items-center justify-center gap-2 rounded-md bg-purple-600 px-4 py-2 text-white transition-colors hover:bg-purple-700"
+              );
+            })}
+          </div>
+        </div>
+
+        {testCaseView === 'catalog' && (
+          <>
+            <div className="grid gap-6 xl:grid-cols-[1.5fr_1fr]">
+              <form
+                onSubmit={handleTestCaseSubmit}
+                className="w-full rounded-lg border border-slate-700 bg-slate-900/60 p-6"
               >
-                {editingTestCaseId ? <Edit3 className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
-                {editingTestCaseId ? 'Update' : 'Create'} Test Case
-              </button>
-            </div>
-          </form>
-
-          <div className="w-full space-y-4 lg:w-2/3">
-            <div className="flex flex-col gap-3 rounded-lg border border-slate-700 bg-slate-900/60 p-4 md:flex-row md:items-center md:justify-between">
-              <div className="flex items-center gap-3">
-                <input
-                  value={testCaseSearch}
-                  onChange={(event) => setTestCaseSearch(event.target.value)}
-                  placeholder="Search test cases..."
-                  className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none md:w-80"
-                />
-                <button
-                  type="button"
-                  onClick={toggleSelectAllFiltered}
-                  className="rounded-md border border-purple-500/40 px-3 py-2 text-sm text-purple-200 hover:bg-purple-500/10"
-                >
-                  {allSelected ? 'Unselect' : 'Select'} filtered
-                </button>
-              </div>
-              <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={refreshAll}
-                  className="flex items-center gap-2 rounded-md border border-slate-700 px-3 py-2 text-sm text-gray-200 transition-colors hover:bg-slate-800"
-                >
-                  <RefreshCcw className="h-4 w-4" /> Refresh
-                </button>
-                <span className="text-sm text-gray-400">
-                  {selectedTestCaseIds.length} selected
-                </span>
-              </div>
-            </div>
-
-            <div className="overflow-hidden rounded-lg border border-slate-700">
-              <table className="min-w-full divide-y divide-slate-700">
-                <thead className="bg-slate-800/60">
-                  <tr>
-                    <th className="px-4 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-400">
-                      <input
-                        type="checkbox"
-                        checked={allSelected}
-                        onChange={toggleSelectAllFiltered}
-                      />
-                    </th>
-                    <th className="px-4 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-400">
-                      Reference
-                    </th>
-                    <th className="px-4 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-400">
-                      Title
-                    </th>
-                    <th className="px-4 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-400">
-                      Category
-                    </th>
-                    <th className="px-4 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-400">
-                      Priority
-                    </th>
-                    <th className="px-4 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-400">
-                      Status
-                    </th>
-                    <th className="px-4 py-2" />
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800 bg-slate-900/40">
-                  {filteredTestCases.map((testCase) => (
-                    <tr key={testCase.id} className="hover:bg-slate-800/40">
-                      <td className="px-4 py-3 text-sm text-gray-300">
-                        <input
-                          type="checkbox"
-                          checked={selectedTestCaseIds.includes(testCase.id)}
-                          onChange={() => toggleTestCaseSelection(testCase.id)}
-                        />
-                      </td>
-                      <td className="px-4 py-3 text-sm font-semibold text-purple-200">
-                        {testCase.reference}
-                      </td>
-                      <td className="px-4 py-3 text-sm text-gray-200">{testCase.title}</td>
-                      <td className="px-4 py-3 text-sm text-gray-400">
-                        {testCase.category || '—'}
-                      </td>
-                      <td className="px-4 py-3 text-sm text-gray-400">{testCase.priority}</td>
-                      <td className="px-4 py-3 text-sm">
-                        <span className="rounded-full bg-slate-800/80 px-3 py-1 text-xs text-gray-300">
-                          {testCase.status}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-right text-sm">
-                        <div className="flex items-center justify-end gap-2">
-                          <button
-                            onClick={() => handleTestCaseEdit(testCase)}
-                            className="rounded-md border border-slate-700 p-1 text-gray-300 hover:bg-slate-800"
-                          >
-                            <Edit3 className="h-4 w-4" />
-                          </button>
-                          <button
-                            onClick={() => handleTestCaseDelete(testCase.id)}
-                            className="rounded-md border border-rose-500/30 p-1 text-rose-200 hover:bg-rose-500/20"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {filteredTestCases.length === 0 && (
-                    <tr>
-                      <td colSpan={7} className="px-4 py-6 text-center text-sm text-gray-400">
-                        No test cases found.
-                      </td>
-                    </tr>
+                <div className="mb-4 flex items-center justify-between">
+                  <h2 className="text-lg font-semibold text-purple-200">
+                    {editingTestCaseId ? 'Edit Task Definition' : 'Create Task Definition'}
+                  </h2>
+                  {editingTestCaseId && (
+                    <button
+                      type="button"
+                      onClick={resetTestCaseForm}
+                      className="rounded-md border border-slate-700 px-3 py-1 text-sm text-gray-300 hover:bg-slate-800"
+                    >
+                      Cancel
+                    </button>
                   )}
-                </tbody>
-              </table>
+                </div>
+                <div className="space-y-4">
+                  <div>
+                    <label className="mb-1 block text-sm text-gray-300">Reference</label>
+                    <input
+                      required
+                      value={testCaseForm.reference}
+                      onChange={(event) => handleTestCaseFieldChange('reference', event.target.value)}
+                      className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-sm text-gray-300">Title</label>
+                    <input
+                      required
+                      value={testCaseForm.title}
+                      onChange={(event) => handleTestCaseFieldChange('title', event.target.value)}
+                      className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-sm text-gray-300">Description</label>
+                    <textarea
+                      rows={3}
+                      value={testCaseForm.description}
+                      onChange={(event) => handleTestCaseFieldChange('description', event.target.value)}
+                      className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="mb-1 block text-sm text-gray-300">Category</label>
+                      <input
+                        value={testCaseForm.category}
+                        onChange={(event) => handleTestCaseFieldChange('category', event.target.value)}
+                        className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-sm text-gray-300">Priority</label>
+                      <select
+                        value={testCaseForm.priority}
+                        onChange={(event) => handleTestCaseFieldChange('priority', event.target.value)}
+                        className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+                      >
+                        {priorities.map((priority) => (
+                          <option key={priority} value={priority}>
+                            {priority}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="mb-1 block text-sm text-gray-300">Status</label>
+                      <select
+                        value={testCaseForm.status}
+                        onChange={(event) => handleTestCaseFieldChange('status', event.target.value)}
+                        className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+                      >
+                        {statuses.map((status) => (
+                          <option key={status} value={status}>
+                            {status}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-sm text-gray-300">Tags</label>
+                      <input
+                        value={testCaseForm.tags}
+                        onChange={(event) => handleTestCaseFieldChange('tags', event.target.value)}
+                        placeholder="Smoke, regression"
+                        className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-sm text-gray-300">Steps (one per line)</label>
+                    <textarea
+                      rows={4}
+                      value={testCaseForm.steps}
+                      onChange={(event) => handleTestCaseFieldChange('steps', event.target.value)}
+                      className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    className="flex items-center justify-center gap-2 rounded-md bg-purple-600 px-4 py-2 text-white transition-colors hover:bg-purple-700"
+                  >
+                    {editingTestCaseId ? <Edit3 className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+                    {editingTestCaseId ? 'Update Task' : 'Create Task'}
+                  </button>
+                </div>
+              </form>
+
+              <div className="space-y-4">
+                <div className="flex flex-col gap-3 rounded-lg border border-slate-700 bg-slate-900/60 p-4 md:flex-row md:items-center md:justify-between">
+                  <div className="flex flex-1 flex-col gap-2 sm:flex-row sm:items-center">
+                    <input
+                      value={testCaseSearch}
+                      onChange={(event) => setTestCaseSearch(event.target.value)}
+                      placeholder="Search MCP tasks..."
+                      className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none sm:w-80"
+                    />
+                    <button
+                      type="button"
+                      onClick={toggleSelectAllFiltered}
+                      className="rounded-md border border-purple-500/40 px-3 py-2 text-sm text-purple-200 hover:bg-purple-500/10"
+                    >
+                      {allSelected ? 'Unselect' : 'Select'} filtered
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={refreshAll}
+                      className="flex items-center gap-2 rounded-md border border-slate-700 px-3 py-2 text-sm text-gray-200 transition-colors hover:bg-slate-800"
+                    >
+                      <RefreshCcw className="h-4 w-4" /> Refresh
+                    </button>
+                    <span className="text-sm text-gray-400">
+                      {selectedTestCaseIds.length} selected
+                    </span>
+                  </div>
+                </div>
+
+                <div className="overflow-hidden rounded-lg border border-slate-700">
+                  <table className="min-w-full divide-y divide-slate-700">
+                    <thead className="bg-slate-800/60">
+                      <tr>
+                        <th className="px-4 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-400">
+                          <input
+                            type="checkbox"
+                            checked={allSelected}
+                            onChange={toggleSelectAllFiltered}
+                          />
+                        </th>
+                        <th className="px-4 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-400">
+                          Reference
+                        </th>
+                        <th className="px-4 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-400">
+                          Title
+                        </th>
+                        <th className="px-4 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-400">
+                          Category
+                        </th>
+                        <th className="px-4 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-400">
+                          Priority
+                        </th>
+                        <th className="px-4 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-400">
+                          Status
+                        </th>
+                        <th className="px-4 py-2" />
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800 bg-slate-900/40">
+                      {filteredTestCases.map((testCase) => (
+                        <tr key={testCase.id} className="hover:bg-slate-800/40">
+                          <td className="px-4 py-3 text-sm text-gray-300">
+                            <input
+                              type="checkbox"
+                              checked={selectedTestCaseIds.includes(testCase.id)}
+                              onChange={() => toggleTestCaseSelection(testCase.id)}
+                            />
+                          </td>
+                          <td className="px-4 py-3 text-sm font-semibold text-purple-200">
+                            {testCase.reference}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-gray-200">{testCase.title}</td>
+                          <td className="px-4 py-3 text-sm text-gray-400">
+                            {testCase.category || '—'}
+                          </td>
+                          <td className="px-4 py-3 text-sm text-gray-400">{testCase.priority}</td>
+                          <td className="px-4 py-3 text-sm">
+                            <span className="rounded-full bg-slate-800/80 px-3 py-1 text-xs text-gray-300">
+                              {testCase.status}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-right text-sm">
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                onClick={() => handleTestCaseEdit(testCase)}
+                                className="rounded-md border border-slate-700 p-1 text-gray-300 hover:bg-slate-800"
+                              >
+                                <Edit3 className="h-4 w-4" />
+                              </button>
+                              <button
+                                onClick={() => handleTestCaseDelete(testCase.id)}
+                                className="rounded-md border border-rose-500/30 p-1 text-rose-200 hover:bg-rose-500/20"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                      {filteredTestCases.length === 0 && (
+                        <tr>
+                          <td colSpan={7} className="px-4 py-6 text-center text-sm text-gray-400">
+                            No tasks found.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </div>
 
-            <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-5">
-              <div className="mb-4 flex items-center justify-between">
+            <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-6">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <div>
-                  <h3 className="text-lg font-semibold text-purple-200">Queue Test Execution</h3>
+                  <h3 className="text-lg font-semibold text-purple-200">Queue MCP Tasks</h3>
                   <p className="text-sm text-gray-400">
-                    Select test cases above, choose a model configuration, then queue the run.
+                    Selected tasks will run with the default model configuration below.
                   </p>
                 </div>
                 <button
                   type="button"
                   onClick={handleRunQueue}
-                  disabled={isLoading.queue}
+                  disabled={isLoading.queue || !defaultModelConfig}
                   className="flex items-center gap-2 rounded-md bg-purple-600 px-4 py-2 text-white transition-colors hover:bg-purple-700 disabled:cursor-not-allowed disabled:bg-purple-900/40"
                 >
                   {isLoading.queue ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
                   Queue Run
                 </button>
               </div>
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className="space-y-3">
-                  <label className="flex items-center gap-2 text-sm text-gray-300">
-                    <input
-                      type="checkbox"
-                      checked={runForm.useNewModel}
-                      onChange={(event) =>
-                        setRunForm((prev) => ({ ...prev, useNewModel: event.target.checked }))
-                      }
-                    />
-                    Create new model configuration for this run
-                  </label>
-                  {!runForm.useNewModel && (
-                    <select
-                      value={runForm.modelConfigId}
-                      onChange={(event) => handleRunFormChange('modelConfigId', event.target.value)}
-                      className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
-                    >
-                      <option value="">Select model configuration</option>
-                      {modelConfigs.map((config) => (
-                        <option key={config.id} value={config.id}>
-                          {config.name} · {config.provider}
-                        </option>
-                      ))}
-                    </select>
+              <div className="mt-4 grid gap-4 lg:grid-cols-2">
+                <div className="rounded-md border border-slate-700 bg-slate-950/40 p-4">
+                  <p className="text-xs uppercase tracking-wide text-gray-400">Default model</p>
+                  {defaultModelConfig ? (
+                    <>
+                      <p className="mt-1 text-sm font-semibold text-purple-200">
+                        {defaultModelConfig.name}
+                      </p>
+                      <p className="text-xs text-gray-400">{defaultModelConfig.provider}</p>
+                      {defaultModelConfig.description && (
+                        <p className="mt-2 text-xs text-gray-400">{defaultModelConfig.description}</p>
+                      )}
+                    </>
+                  ) : (
+                    <p className="mt-2 text-sm text-rose-300">
+                      No model configuration available. Contact your administrator to provision one.
+                    </p>
                   )}
+                </div>
+                <div className="space-y-3">
                   <select
                     value={runForm.promptId}
                     onChange={(event) => handleRunFormChange('promptId', event.target.value)}
@@ -1209,202 +1177,289 @@ function App() {
                     ))}
                   </select>
                   <textarea
-                    rows={3}
+                    rows={4}
                     placeholder="Optional custom prompt override"
                     value={runForm.promptOverride}
                     onChange={(event) => handleRunFormChange('promptOverride', event.target.value)}
                     className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
                   />
                 </div>
-                {runForm.useNewModel && (
-                  <div className="space-y-3">
-                    <input
-                      placeholder="Model name"
-                      value={runForm.newModel.name}
-                      onChange={(event) =>
-                        setRunForm((prev) => ({
-                          ...prev,
-                          newModel: { ...prev.newModel, name: event.target.value },
-                        }))
-                      }
-                      className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
-                    />
-                    <input
-                      placeholder="Provider"
-                      value={runForm.newModel.provider}
-                      onChange={(event) =>
-                        setRunForm((prev) => ({
-                          ...prev,
-                          newModel: { ...prev.newModel, provider: event.target.value },
-                        }))
-                      }
-                      className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
-                    />
-                    <textarea
-                      rows={2}
-                      placeholder="Description"
-                      value={runForm.newModel.description}
-                      onChange={(event) =>
-                        setRunForm((prev) => ({
-                          ...prev,
-                          newModel: { ...prev.newModel, description: event.target.value },
-                        }))
-                      }
-                      className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
-                    />
-                    <textarea
-                      rows={4}
-                      placeholder="Parameters (JSON)"
-                      value={runForm.newModel.parameters}
-                      onChange={(event) =>
-                        setRunForm((prev) => ({
-                          ...prev,
-                          newModel: { ...prev.newModel, parameters: event.target.value },
-                        }))
-                      }
-                      className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 font-mono text-sm text-white focus:border-purple-500 focus:outline-none"
-                    />
-                  </div>
-                )}
               </div>
             </div>
-        </div>
-        <div className="mt-6 rounded-lg border border-slate-700 bg-slate-900/60 p-6">
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h3 className="text-lg font-semibold text-purple-200">Manual MCP Task Runner</h3>
-              <p className="text-sm text-gray-400">
-                Launch an ad-hoc MCP task using the shared session pool and optional overrides.
-              </p>
-            </div>
-            {activeTaskId && (
-              <span className="rounded-full border border-slate-700 px-3 py-1 text-xs uppercase tracking-wide text-gray-300">
-                Task ID: {activeTaskId}
-              </span>
-            )}
-          </div>
-          <form onSubmit={handleTaskStart} className="mt-4 space-y-4">
-            <textarea
-              rows={4}
-              required
-              value={taskForm.task}
-              onChange={(event) => setTaskForm((prev) => ({ ...prev, task: event.target.value }))}
-              placeholder="Describe the task for the MCP agent to execute"
-              className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
-            />
-            <div className="grid gap-4 md:grid-cols-3">
-              <select
-                value={taskForm.modelId}
-                onChange={(event) => setTaskForm((prev) => ({ ...prev, modelId: event.target.value }))}
-                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
-              >
-                <option value="">Use default configured model</option>
-                {llmModels.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.name} ({model.model_name})
-                  </option>
-                ))}
-              </select>
-              <select
-                value={taskForm.promptId}
-                onChange={(event) => setTaskForm((prev) => ({ ...prev, promptId: event.target.value }))}
-                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
-              >
-                <option value="">Use default prompt</option>
-                {prompts.map((prompt) => (
-                  <option key={prompt.id} value={prompt.id}>
-                    {prompt.name} {prompt.is_system ? '· System' : ''}
-                  </option>
-                ))}
-              </select>
-              <textarea
-                rows={2}
-                value={taskForm.promptText}
-                onChange={(event) => setTaskForm((prev) => ({ ...prev, promptText: event.target.value }))}
-                placeholder="Optional custom prompt override"
-                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
-              />
-            </div>
-            <div className="flex flex-wrap items-center gap-3">
-              <button
-                type="submit"
-                disabled={isTaskStreaming}
-                className="flex items-center gap-2 rounded-md bg-purple-600 px-4 py-2 text-white transition-colors hover:bg-purple-700 disabled:cursor-not-allowed disabled:bg-purple-900/40"
-              >
-                {isTaskStreaming ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                {isTaskStreaming ? 'Running Task' : 'Start Task'}
-              </button>
-              <button
-                type="button"
-                onClick={handleTaskCancel}
-                disabled={!isTaskStreaming && !activeTaskId}
-                className="flex items-center gap-2 rounded-md border border-slate-700 px-4 py-2 text-sm text-gray-200 transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:text-gray-500"
-              >
-                <StopCircle className="h-4 w-4" /> Cancel Task
-              </button>
-            </div>
-          </form>
-          <div className="mt-4 grid gap-4 md:grid-cols-2">
-            <div className="space-y-1 text-sm text-gray-300">
-              <p>
-                Status:{' '}
-                <span className="font-semibold text-purple-200">{taskStatus || 'idle'}</span>
-              </p>
-              <p>
-                MCP Session:{' '}
-                <span className="text-gray-400">{taskServerInfo.serverUrl || 'Waiting'}</span>
-              </p>
-              <p>
-                Xpra Stream:{' '}
-                {taskServerInfo.xpraUrl ? (
-                  <a
-                    href={taskServerInfo.xpraUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-purple-300 underline"
-                  >
-                    Open session
-                  </a>
-                ) : (
-                  <span className="text-gray-400">Waiting</span>
-                )}
-              </p>
-            </div>
-          </div>
-          <div className="mt-4 max-h-64 overflow-auto space-y-2 pr-2">
-            {taskLogs.length === 0 && (
-              <div className="rounded-md border border-slate-700 bg-slate-900/40 px-3 py-2 text-sm text-gray-400">
-                Task output will appear here.
+          </>
+        )}
+
+        {testCaseView === 'history' && (
+          <div className="grid gap-6 lg:grid-cols-3">
+            <div className="space-y-4 lg:col-span-1">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-semibold text-purple-200">Run Groups</h3>
+                <button
+                  type="button"
+                  onClick={() => fetchTestRuns()}
+                  className="flex items-center gap-2 rounded-md border border-slate-700 px-3 py-2 text-sm text-gray-200 hover:bg-slate-800"
+                >
+                  <RefreshCcw className="h-4 w-4" /> Refresh
+                </button>
               </div>
-            )}
-            {taskLogs.map((entry, index) => (
-              <div
-                key={`${entry.timestamp}-${index}`}
-                className={`rounded-md border px-3 py-2 text-sm ${
-                  entry.type === 'error'
-                    ? 'border-rose-500/40 bg-rose-500/10 text-rose-200'
-                    : entry.type === 'success'
-                    ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
-                    : entry.type === 'cancelled'
-                    ? 'border-amber-400/40 bg-amber-500/10 text-amber-200'
-                    : 'border-slate-700 bg-slate-900/40 text-gray-200'
-                }`}
-              >
-                <div className="flex items-center justify-between text-[11px] text-gray-400">
-                  <span>{new Date(entry.timestamp).toLocaleTimeString()}</span>
-                  <span className="uppercase tracking-wide">{entry.type}</span>
+              {['running', 'pending', 'queued', 'completed', 'failed'].map((group) => (
+                <div key={group} className="space-y-2">
+                  <h4 className="text-sm font-semibold uppercase tracking-wide text-gray-400">
+                    {group}
+                  </h4>
+                  {groupedRuns[group].map((run) => (
+                    <button
+                      key={run.id}
+                      onClick={() => setSelectedRunId(run.id)}
+                      className={`w-full rounded-md border px-4 py-3 text-left transition-colors ${
+                        selectedRunId === run.id
+                          ? 'border-purple-500 bg-purple-500/20'
+                          : 'border-slate-700 bg-slate-900/50 hover:border-purple-400/40'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-semibold text-gray-200">Run #{run.id}</span>
+                        <span className="text-xs text-gray-400">{run.status}</span>
+                      </div>
+                      <p className="mt-1 text-xs text-gray-400">Task #{run.test_case_id}</p>
+                    </button>
+                  ))}
+                  {groupedRuns[group].length === 0 && (
+                    <div className="rounded-md border border-slate-700 bg-slate-900/40 px-4 py-3 text-sm text-gray-400">
+                      None
+                    </div>
+                  )}
                 </div>
-                <p className="mt-1 text-xs">
-                  {typeof entry.message === 'string' ? entry.message : JSON.stringify(entry.message)}
+              ))}
+            </div>
+            <div className="lg:col-span-2">
+              {selectedRun ? (
+                <div className="space-y-4">
+                  <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-6">
+                    <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                      <div>
+                        <h3 className="text-xl font-semibold text-purple-200">Run #{selectedRun.id}</h3>
+                        <p className="text-sm text-gray-400">
+                          Status: <span className="text-purple-200">{selectedRun.status}</span>
+                        </p>
+                        <p className="text-sm text-gray-400">
+                          Result: <span className="text-gray-200">{selectedRun.result || '—'}</span>
+                        </p>
+                        <p className="text-sm text-gray-400">
+                          Model Config ID: {selectedRun.model_config_id || '—'}
+                        </p>
+                        <p className="text-sm text-gray-400">Server URL: {selectedRun.server_url || '—'}</p>
+                      </div>
+                      <div className="space-y-2 text-sm text-gray-400">
+                        <p>Created: {formatDate(selectedRun.created_at)}</p>
+                        <p>Started: {formatDate(selectedRun.started_at)}</p>
+                        <p>Completed: {formatDate(selectedRun.completed_at)}</p>
+                        <p>
+                          Duration:{' '}
+                          {selectedRun.metrics?.duration
+                            ? formatDuration(selectedRun.metrics.duration)
+                            : '—'}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="mt-4">
+                      <h4 className="text-sm font-semibold text-gray-300">Prompt</h4>
+                      <pre className="mt-2 max-h-40 overflow-auto rounded-md border border-slate-800 bg-slate-950/60 p-3 text-xs text-gray-300">
+                        {selectedRun.prompt}
+                      </pre>
+                    </div>
+                  </div>
+                  <div className="grid gap-4 lg:grid-cols-2">
+                    <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-4">
+                      <h4 className="mb-3 flex items-center gap-2 text-sm font-semibold text-gray-200">
+                        <Monitor className="h-4 w-4 text-purple-300" /> Xpra Session
+                      </h4>
+                      <div className="h-64 overflow-hidden rounded-md border border-slate-800 bg-black">
+                        <XpraFrame src={selectedRun.xpra_url} />
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-4">
+                      <h4 className="mb-3 flex items-center gap-2 text-sm font-semibold text-gray-200">
+                        <Activity className="h-4 w-4 text-purple-300" /> Console Output
+                      </h4>
+                      <div className="max-h-64 overflow-auto space-y-2 pr-2 text-xs text-gray-300">
+                        {selectedRun.log.length === 0 && (
+                          <div className="rounded-md border border-slate-700 bg-slate-900/40 px-3 py-2 text-sm text-gray-400">
+                            No log entries yet.
+                          </div>
+                        )}
+                        {selectedRun.log.map((entry, index) => (
+                          <div
+                            key={`${entry.timestamp}-${index}`}
+                            className="rounded-md border border-slate-700 bg-slate-900/40 px-3 py-2"
+                          >
+                            <div className="flex items-center justify-between text-[11px] text-gray-400">
+                              <span>{new Date(entry.timestamp).toLocaleTimeString()}</span>
+                              <span className="uppercase tracking-wide">{entry.type}</span>
+                            </div>
+                            <p className="mt-1 whitespace-pre-wrap text-xs text-gray-200">{entry.message}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex h-64 items-center justify-center rounded-lg border border-slate-700 bg-slate-900/60 text-gray-400">
+                  Select a run to inspect its details.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {testCaseView === 'manual' && (
+          <div className="space-y-4 rounded-lg border border-slate-700 bg-slate-900/60 p-6">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h3 className="text-lg font-semibold text-purple-200">Manual MCP Task Runner</h3>
+                <p className="text-sm text-gray-400">
+                  Launch ad-hoc work using the default LLM connection and optional prompt overrides.
                 </p>
               </div>
-            ))}
+              {activeTaskId && (
+                <span className="rounded-full border border-slate-700 px-3 py-1 text-xs uppercase tracking-wide text-gray-300">
+                  Task ID: {activeTaskId}
+                </span>
+              )}
+            </div>
+
+            <form onSubmit={handleTaskStart} className="space-y-4">
+              <textarea
+                rows={4}
+                required
+                value={taskForm.task}
+                onChange={(event) => setTaskForm((prev) => ({ ...prev, task: event.target.value }))}
+                placeholder="Describe the task for the MCP agent to execute"
+                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+              />
+              <div className="rounded-md border border-slate-700 bg-slate-950/40 p-4">
+                <p className="text-xs uppercase tracking-wide text-gray-400">Default LLM connection</p>
+                {defaultLlmModel ? (
+                  <>
+                    <p className="mt-1 text-sm font-semibold text-purple-200">{defaultLlmModel.name}</p>
+                    <p className="text-xs text-gray-400">{defaultLlmModel.model_name}</p>
+                    <p className="text-xs text-gray-500">{defaultLlmModel.base_url}</p>
+                  </>
+                ) : (
+                  <p className="mt-2 text-sm text-rose-300">
+                    No LLM connection detected. Add one on the Connections tab before launching tasks.
+                  </p>
+                )}
+              </div>
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <label className="text-sm text-gray-300">Prompt Template</label>
+                  <select
+                    value={taskForm.promptId}
+                    onChange={(event) => setTaskForm((prev) => ({ ...prev, promptId: event.target.value }))}
+                    className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+                  >
+                    <option value="">Use default prompt</option>
+                    {prompts.map((prompt) => (
+                      <option key={prompt.id} value={prompt.id}>
+                        {prompt.name} {prompt.is_system ? '· System' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="space-y-2 md:col-span-2">
+                  <label className="text-sm text-gray-300">Custom prompt override</label>
+                  <textarea
+                    rows={3}
+                    value={taskForm.promptText}
+                    onChange={(event) => setTaskForm((prev) => ({ ...prev, promptText: event.target.value }))}
+                    placeholder="Optional custom instructions"
+                    className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="submit"
+                  disabled={isTaskStreaming || !defaultLlmModel}
+                  className="flex items-center gap-2 rounded-md bg-purple-600 px-4 py-2 text-white transition-colors hover:bg-purple-700 disabled:cursor-not-allowed disabled:bg-purple-900/40"
+                >
+                  {isTaskStreaming ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                  {isTaskStreaming ? 'Running Task' : 'Start Task'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleTaskCancel}
+                  disabled={!isTaskStreaming && !activeTaskId}
+                  className="flex items-center gap-2 rounded-md border border-slate-700 px-4 py-2 text-sm text-gray-200 transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:text-gray-500"
+                >
+                  <StopCircle className="h-4 w-4" /> Cancel Task
+                </button>
+              </div>
+            </form>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2 text-sm text-gray-300">
+                <p>
+                  Status:{' '}
+                  <span className="font-semibold text-purple-200">{taskStatus || 'idle'}</span>
+                </p>
+                <p>
+                  MCP Session:{' '}
+                  <span className="text-gray-400">{taskServerInfo.serverUrl || 'Waiting'}</span>
+                </p>
+                <p>
+                  Xpra Stream:{' '}
+                  {taskServerInfo.xpraUrl ? (
+                    <a
+                      href={taskServerInfo.xpraUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-purple-300 underline"
+                    >
+                      Open session
+                    </a>
+                  ) : (
+                    <span className="text-gray-400">Waiting</span>
+                  )}
+                </p>
+              </div>
+              <div className="max-h-64 overflow-auto space-y-2 pr-2">
+                {taskLogs.length === 0 && (
+                  <div className="rounded-md border border-slate-700 bg-slate-900/40 px-3 py-2 text-sm text-gray-400">
+                    Task output will appear here.
+                  </div>
+                )}
+                {taskLogs.map((entry, index) => (
+                  <div
+                    key={`${entry.timestamp}-${index}`}
+                    className={`rounded-md border px-3 py-2 text-sm ${
+                      entry.type === 'error'
+                        ? 'border-rose-500/40 bg-rose-500/10 text-rose-200'
+                        : entry.type === 'success'
+                        ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
+                        : entry.type === 'cancelled'
+                        ? 'border-amber-400/40 bg-amber-500/10 text-amber-200'
+                        : 'border-slate-700 bg-slate-900/40 text-gray-200'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between text-[11px] text-gray-400">
+                      <span>{new Date(entry.timestamp).toLocaleTimeString()}</span>
+                      <span className="uppercase tracking-wide">{entry.type}</span>
+                    </div>
+                    <p className="mt-1 text-xs">
+                      {typeof entry.message === 'string' ? entry.message : JSON.stringify(entry.message)}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
-        </div>
+        )}
       </div>
-    </div>
-  );
-};
+    );
+  };
 
   const renderQualityTab = () => {
     if (!qualityInsights) {
@@ -1498,244 +1553,56 @@ function App() {
     );
   };
 
-  const renderTasksTab = () => (
-    <div className="grid gap-6 lg:grid-cols-3">
-      <div className="space-y-4 lg:col-span-1">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-purple-200">Runs</h2>
+  const renderModelsTab = () => (
+    <div className="space-y-6">
+      <section className="rounded-lg border border-slate-700 bg-slate-900/60 p-6">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-purple-200">Provisioned Model Configurations</h2>
+            <p className="text-sm text-gray-400">
+              Model configurations are managed centrally. The default entry is used automatically when tasks are queued.
+            </p>
+          </div>
           <button
             type="button"
-            onClick={() => fetchTestRuns()}
-            className="flex items-center gap-2 rounded-md border border-slate-700 px-3 py-2 text-sm text-gray-200 hover:bg-slate-800"
+            onClick={() => fetchModelConfigs()}
+            className="flex items-center gap-2 rounded-md border border-slate-700 px-3 py-2 text-sm text-gray-200 transition-colors hover:bg-slate-800"
           >
             <RefreshCcw className="h-4 w-4" /> Refresh
           </button>
         </div>
-        {['running', 'pending', 'queued', 'completed', 'failed'].map((group) => (
-          <div key={group} className="space-y-2">
-            <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-400">
-              {group}
-            </h3>
-            {groupedRuns[group].map((run) => (
-              <button
-                key={run.id}
-                onClick={() => setSelectedRunId(run.id)}
-                className={`w-full rounded-md border px-4 py-3 text-left transition-colors ${
-                  selectedRunId === run.id
-                    ? 'border-purple-500 bg-purple-500/20'
-                    : 'border-slate-700 bg-slate-900/50 hover:border-purple-400/40'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-semibold text-gray-200">Run #{run.id}</span>
-                  <span className="text-xs text-gray-400">{run.status}</span>
-                </div>
-                <p className="mt-1 text-xs text-gray-400">Test Case #{run.test_case_id}</p>
-              </button>
-            ))}
-            {groupedRuns[group].length === 0 && (
-              <div className="rounded-md border border-slate-700 bg-slate-900/40 px-4 py-3 text-sm text-gray-400">
-                None
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-      <div className="lg:col-span-2">
-        {selectedRun ? (
-          <div className="space-y-4">
-            <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-6">
-              <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                <div>
-                  <h2 className="text-xl font-semibold text-purple-200">
-                    Run #{selectedRun.id}
-                  </h2>
-                  <p className="text-sm text-gray-400">
-                    Status: <span className="text-purple-200">{selectedRun.status}</span>
-                  </p>
-                  <p className="text-sm text-gray-400">
-                    Result: <span className="text-gray-200">{selectedRun.result || '—'}</span>
-                  </p>
-                  <p className="text-sm text-gray-400">Model Config ID: {selectedRun.model_config_id || '—'}</p>
-                  <p className="text-sm text-gray-400">Server URL: {selectedRun.server_url || '—'}</p>
-                </div>
-                <div className="space-y-2 text-sm text-gray-400">
-                  <p>Created: {formatDate(selectedRun.created_at)}</p>
-                  <p>Started: {formatDate(selectedRun.started_at)}</p>
-                  <p>Completed: {formatDate(selectedRun.completed_at)}</p>
-                  <p>
-                    Duration:{' '}
-                    {selectedRun.metrics?.duration ?
-                      formatDuration(selectedRun.metrics.duration) : '—'}
-                  </p>
-                </div>
-              </div>
-              <div className="mt-4">
-                <h3 className="text-sm font-semibold text-gray-300">Prompt</h3>
-                <pre className="mt-2 max-h-40 overflow-auto rounded-md border border-slate-800 bg-slate-950/60 p-3 text-xs text-gray-300">
-                  {selectedRun.prompt}
-                </pre>
-              </div>
-            </div>
-            <div className="grid gap-4 lg:grid-cols-2">
-              <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-4">
-                <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-gray-200">
-                  <Monitor className="h-4 w-4 text-purple-300" /> Xpra Session
-                </h3>
-                <div className="h-64 overflow-hidden rounded-md border border-slate-800 bg-black">
-                  <XpraFrame src={selectedRun.xpra_url} />
-                </div>
-              </div>
-              <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-4">
-                <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-gray-200">
-                  <Activity className="h-4 w-4 text-purple-300" /> Console Output
-                </h3>
-                <div className="max-h-64 overflow-auto space-y-2 pr-2 text-xs text-gray-300">
-                  {selectedRun.log.length === 0 && (
-                    <div className="rounded-md border border-slate-700 bg-slate-900/40 px-3 py-2 text-sm text-gray-400">
-                      No log entries yet.
-                    </div>
-                  )}
-                  {selectedRun.log.map((entry, index) => (
-                    <div
-                      key={`${entry.timestamp}-${index}`}
-                      className={`rounded-md border px-3 py-2 ${
-                        entry.type === 'error'
-                          ? 'border-rose-500/40 bg-rose-500/10 text-rose-200'
-                          : entry.type === 'success'
-                          ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
-                          : 'border-slate-700 bg-slate-900/40'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between text-[11px] text-gray-400">
-                        <span>{new Date(entry.timestamp).toLocaleTimeString()}</span>
-                        <span className="uppercase tracking-wide">{entry.type}</span>
-                      </div>
-                      <p className="mt-1 text-xs text-gray-200">{entry.message}</p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="flex h-64 items-center justify-center rounded-lg border border-slate-700 bg-slate-900/60 text-gray-400">
-            Select a run to inspect its details.
-          </div>
-        )}
-      </div>
-    </div>
-  );
-
-  const renderModelsTab = () => (
-    <div className="space-y-6">
-      <div className="grid gap-6 lg:grid-cols-2">
-        <form
-          onSubmit={handleModelFormSubmit}
-          className="rounded-lg border border-slate-700 bg-slate-900/60 p-6"
-        >
-          <h2 className="mb-4 text-lg font-semibold text-purple-200">
-            {modelForm.id ? 'Edit Model Configuration' : 'Create Model Configuration'}
-          </h2>
-          <div className="space-y-4">
-            <div>
-              <label className="mb-1 block text-sm text-gray-300">Name</label>
-              <input
-                required
-                value={modelForm.name}
-                onChange={(event) => setModelForm((prev) => ({ ...prev, name: event.target.value }))}
-                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-sm text-gray-300">Provider</label>
-              <input
-                required
-                value={modelForm.provider}
-                onChange={(event) => setModelForm((prev) => ({ ...prev, provider: event.target.value }))}
-                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-sm text-gray-300">Description</label>
-              <textarea
-                rows={3}
-                value={modelForm.description}
-                onChange={(event) => setModelForm((prev) => ({ ...prev, description: event.target.value }))}
-                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-white focus:border-purple-500 focus:outline-none"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-sm text-gray-300">Parameters (JSON)</label>
-              <textarea
-                rows={6}
-                value={modelForm.parameters}
-                onChange={(event) => setModelForm((prev) => ({ ...prev, parameters: event.target.value }))}
-                className="w-full rounded-md border border-slate-700 bg-slate-800 px-3 py-2 font-mono text-sm text-white focus:border-purple-500 focus:outline-none"
-              />
-            </div>
-            <div className="flex items-center gap-3">
-              <button
-                type="submit"
-                className="flex items-center gap-2 rounded-md bg-purple-600 px-4 py-2 text-white transition-colors hover:bg-purple-700"
-              >
-                <Upload className="h-4 w-4" />
-                {modelForm.id ? 'Update Model' : 'Create Model'}
-              </button>
-              {modelForm.id && (
-                <button
-                  type="button"
-                  onClick={() => setModelForm(emptyModelForm)}
-                  className="rounded-md border border-slate-700 px-3 py-2 text-sm text-gray-300 hover:bg-slate-800"
-                >
-                  Cancel
-                </button>
-              )}
-            </div>
-          </div>
-        </form>
-
-        <div className="space-y-3">
+        <div className="mt-4 space-y-3">
           {modelConfigs.map((config) => (
             <div
               key={config.id}
               className="rounded-lg border border-slate-700 bg-slate-900/60 p-5"
             >
-              <div className="flex items-start justify-between">
+              <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                 <div>
+                  <p className="text-xs uppercase tracking-wide text-gray-400">{config.provider}</p>
                   <h3 className="text-lg font-semibold text-purple-200">{config.name}</h3>
-                  <p className="text-sm text-gray-400">{config.provider}</p>
+                  {config.description && (
+                    <p className="mt-1 text-sm text-gray-400">{config.description}</p>
+                  )}
                 </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => handleModelEdit(config)}
-                    className="rounded-md border border-slate-700 p-1 text-gray-300 hover:bg-slate-800"
-                  >
-                    <Edit3 className="h-4 w-4" />
-                  </button>
-                  <button
-                    onClick={() => handleModelDelete(config.id)}
-                    className="rounded-md border border-rose-500/30 p-1 text-rose-200 hover:bg-rose-500/20"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
+                {defaultModelConfig && defaultModelConfig.id === config.id && (
+                  <span className="inline-flex items-center rounded-full border border-purple-500/50 px-3 py-1 text-xs uppercase tracking-wide text-purple-200">
+                    Default runtime model
+                  </span>
+                )}
               </div>
-              <div className="mt-3 space-y-2 text-sm text-gray-300">
-                <p>{config.description || 'No description provided.'}</p>
-                <pre className="max-h-32 overflow-auto rounded-md border border-slate-800 bg-slate-950/60 p-3 text-xs text-gray-300">
-                  {JSON.stringify(config.parameters || {}, null, 2)}
-                </pre>
-              </div>
+              <pre className="mt-3 max-h-40 overflow-auto rounded-md border border-slate-800 bg-slate-950/60 p-3 text-xs text-gray-300">
+                {JSON.stringify(config.parameters || {}, null, 2)}
+              </pre>
             </div>
           ))}
           {modelConfigs.length === 0 && (
             <div className="rounded-lg border border-slate-700 bg-slate-900/60 p-6 text-center text-gray-400">
-              No model configurations yet.
+              No model configurations available yet.
             </div>
           )}
         </div>
-      </div>
+      </section>
 
       <div className="grid gap-6 lg:grid-cols-2">
         <form
@@ -1745,6 +1612,7 @@ function App() {
           <h2 className="mb-4 text-lg font-semibold text-purple-200">
             {llmForm.id ? 'Edit LLM Connection' : 'Add LLM Connection'}
           </h2>
+          <p className="mb-4 text-sm text-gray-400">Connections are verified against the provider before being saved.</p>
           <div className="space-y-4">
             <div>
               <label className="mb-1 block text-sm text-gray-300">Display Name</label>
@@ -1795,9 +1663,10 @@ function App() {
             <div className="flex items-center gap-3">
               <button
                 type="submit"
-                className="flex items-center gap-2 rounded-md bg-purple-600 px-4 py-2 text-white transition-colors hover:bg-purple-700"
+                disabled={isSavingLlm}
+                className="flex items-center gap-2 rounded-md bg-purple-600 px-4 py-2 text-white transition-colors hover:bg-purple-700 disabled:cursor-not-allowed disabled:bg-purple-900/40"
               >
-                <Upload className="h-4 w-4" />
+                {isSavingLlm ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
                 {llmForm.id ? 'Update LLM' : 'Add LLM'}
               </button>
               {llmForm.id && (
@@ -1975,8 +1844,6 @@ function App() {
         return renderTestCasesTab();
       case 'quality':
         return renderQualityTab();
-      case 'tasks':
-        return renderTasksTab();
       case 'models':
         return renderModelsTab();
       case 'prompts':
@@ -1989,7 +1856,7 @@ function App() {
   return (
     <div className="min-h-screen bg-slate-950 text-white">
       <header className="border-b border-slate-800 bg-slate-950/80 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl flex-col gap-4 px-6 py-6 md:flex-row md:items-center md:justify-between">
+        <div className="flex flex-col gap-4 px-6 py-6 md:flex-row md:items-center md:justify-between">
           <div>
             <h1 className="text-3xl font-bold text-white">TestGPT Control Center</h1>
             <p className="text-sm text-gray-400">
@@ -2019,7 +1886,7 @@ function App() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-6xl px-6 py-8">
+      <main className="px-6 py-8">
         {message && (
           <div className={`mb-6 flex items-center gap-2 rounded-md px-4 py-3 text-sm ${messageVariants[message.type || 'info']}`}>
             {message.type === 'success' && <CheckCircle className="h-4 w-4" />}
@@ -2028,7 +1895,7 @@ function App() {
             <span>{message.text}</span>
           </div>
         )}
-        <div className="rounded-xl border border-slate-800 bg-slate-950/80 p-6 shadow-xl">
+        <div className="w-full rounded-xl border border-slate-800 bg-slate-950/80 p-6 shadow-xl">
           {renderActiveTab()}
         </div>
       </main>

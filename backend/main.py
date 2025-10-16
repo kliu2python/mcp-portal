@@ -365,6 +365,12 @@ class LLMModelUpdate(BaseModel):
     description: Optional[str] = None
 
 
+class LLMModelVerify(BaseModel):
+    base_url: HttpUrl
+    api_key: str = Field(..., min_length=1)
+    model_name: str = Field(..., min_length=1, max_length=150)
+
+
 class LLMModelRead(BaseModel):
     id: int
     name: str
@@ -1061,6 +1067,12 @@ async def list_llm_models(session: AsyncSession = Depends(get_db)):
     result = await session.execute(select(LLMModel).order_by(LLMModel.created_at.desc()))
     models = result.scalars().all()
     return [_llm_model_to_read(model) for model in models]
+
+
+@app.post("/llm-models/verify")
+async def verify_llm_model(payload: LLMModelVerify):
+    await _verify_openai_model(str(payload.base_url), payload.api_key, payload.model_name)
+    return {"status": "ok"}
 
 
 @app.post("/llm-models", response_model=LLMModelRead, status_code=201)
