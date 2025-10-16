@@ -13,7 +13,7 @@ const XpraFrame = React.memo(({ src }) => {
     <iframe
       title="Xpra session"
       src={src}
-      className="h-full w-full rounded-md border border-slate-700 bg-black"
+      className="h-full w-full border-0 bg-black"
       sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
     />
   );

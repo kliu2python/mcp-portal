@@ -76,6 +76,26 @@ function TestCasesTab({
     }
   }, [taskServerInfo]);
 
+  useEffect(() => {
+    if (!isRunXpraModalOpen && !isManualXpraModalOpen) {
+      return undefined;
+    }
+
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        if (isRunXpraModalOpen) {
+          setIsRunXpraModalOpen(false);
+        }
+        if (isManualXpraModalOpen) {
+          setIsManualXpraModalOpen(false);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isManualXpraModalOpen, isRunXpraModalOpen]);
+
   const allSelected =
     filteredTestCases.length > 0 &&
     filteredTestCases.every((testCase) => selectedTestCaseIds.includes(testCase.id));
@@ -529,14 +549,19 @@ function TestCasesTab({
                 {isTaskStreaming ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
                 {isTaskStreaming ? 'Running Task' : 'Start Task'}
               </button>
-              <button
-                type="button"
-                onClick={onTaskCancel}
-                disabled={!isTaskStreaming && !activeTaskId}
-                className="flex items-center gap-2 rounded-md border border-slate-700 px-4 py-2 text-sm text-gray-200 transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:text-gray-500"
-              >
-                <StopCircle className="h-4 w-4" /> Cancel Task
-              </button>
+              {(isTaskStreaming || activeTaskId) && (
+                <button
+                  type="button"
+                  onClick={onTaskCancel}
+                  className={`flex items-center gap-2 rounded-md px-4 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900 ${
+                    isTaskStreaming
+                      ? 'bg-rose-600 text-white hover:bg-rose-700'
+                      : 'border border-slate-700 text-gray-200 hover:bg-slate-800'
+                  }`}
+                >
+                  <StopCircle className="h-4 w-4" /> {isTaskStreaming ? 'Stop Task' : 'Cancel Task'}
+                </button>
+              )}
             </div>
           </form>
 
@@ -640,23 +665,16 @@ function TestCasesTab({
 
       {isRunXpraModalOpen && selectedRun?.xpra_url && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
+          className="fixed inset-0 z-50 bg-black/80"
           role="dialog"
           aria-modal="true"
           onClick={() => setIsRunXpraModalOpen(false)}
         >
           <div
-            className="relative w-full max-w-3xl overflow-hidden rounded-lg border border-slate-700 bg-slate-900/95 shadow-2xl"
+            className="flex h-full w-full flex-col bg-slate-950"
             onClick={(event) => event.stopPropagation()}
           >
-            <button
-              type="button"
-              onClick={() => setIsRunXpraModalOpen(false)}
-              className="absolute right-4 top-4 rounded border border-slate-600 px-3 py-1 text-xs text-gray-200 transition hover:border-purple-400 hover:text-purple-200"
-            >
-              Close
-            </button>
-            <div className="h-[36rem] w-full">
+            <div className="flex-1 min-h-0">
               <XpraFrame src={selectedRun.xpra_url} />
             </div>
           </div>
@@ -665,23 +683,16 @@ function TestCasesTab({
 
       {isManualXpraModalOpen && taskServerInfo?.xpraUrl && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
+          className="fixed inset-0 z-50 bg-black/80"
           role="dialog"
           aria-modal="true"
           onClick={() => setIsManualXpraModalOpen(false)}
         >
           <div
-            className="relative w-full max-w-3xl overflow-hidden rounded-lg border border-slate-700 bg-slate-900/95 shadow-2xl"
+            className="flex h-full w-full flex-col bg-slate-950"
             onClick={(event) => event.stopPropagation()}
           >
-            <button
-              type="button"
-              onClick={() => setIsManualXpraModalOpen(false)}
-              className="absolute right-4 top-4 rounded border border-slate-600 px-3 py-1 text-xs text-gray-200 transition hover:border-purple-400 hover:text-purple-200"
-            >
-              Close
-            </button>
-            <div className="h-[36rem] w-full">
+            <div className="flex-1 min-h-0">
               <XpraFrame src={taskServerInfo.xpraUrl} />
             </div>
           </div>
