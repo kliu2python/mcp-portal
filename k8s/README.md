@@ -10,24 +10,14 @@ The manifests in this directory provide a basic Kubernetes deployment for the MC
 
 ## Build and publish the images
 
-Build both images. When targeting a remote registry, replace `local` with your registry (for example `ghcr.io/<org>` or `registry.example.com`).
+Use the helper script at the root of the repository to build both images with a single command. Replace `local` with the registry or namespace that matches your environment.
 
 ```bash
-# Backend image
-export IMAGE_REGISTRY=local
-export BACKEND_IMAGE="$IMAGE_REGISTRY/mcp-portal-backend:latest"
-export FRONTEND_IMAGE="$IMAGE_REGISTRY/mcp-portal-frontend:latest"
+# Build images with the default Kubernetes-friendly API base URL
+./scripts/build-images.sh -r local
 
-docker build -t "$BACKEND_IMAGE" backend/
-
-docker build \
-  --build-arg REACT_APP_API_BASE_URL=http://backend.mcp-portal.svc.cluster.local:8000 \
-  -t "$FRONTEND_IMAGE" \
-  -f Dockerfile.frontend .
-
-# Push only if required by your cluster
-# docker push "$BACKEND_IMAGE"
-# docker push "$FRONTEND_IMAGE"
+# Push them if your cluster cannot load images directly
+./scripts/build-images.sh -r local --push
 ```
 
 If you are using Kind or Minikube you can load the images directly instead of pushing them:
