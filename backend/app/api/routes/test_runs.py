@@ -17,7 +17,8 @@ from ...services.test_runs import (
     compute_quality_insights,
     run_queue,
 )
-from ...utils.json import dump_dict
+from ...services.vector_memory import append_memory_to_text, fetch_relevant_memory
+from ...utils.json import dump_dict, load_string_list
 
 router = APIRouter()
 
@@ -65,6 +66,16 @@ async def queue_test_runs(
     for case_id in payload.test_case_ids:
         test_case = test_cases[case_id]
         prompt = build_prompt_for_case(test_case, prompt_override)
+        tags = load_string_list(test_case.tags)
+        query_parts = [test_case.title, test_case.description or "", " ".join(tags)]
+        query_text = " \n".join(part for part in query_parts if part)
+        matches = await fetch_relevant_memory(
+            session,
+            query_text=query_text or test_case.title,
+            tags=tags,
+            limit=3,
+        )
+        prompt = append_memory_to_text(prompt, matches)
         run = TestRun(
             test_case_id=test_case.id,
             model_config_id=model_config_id,
