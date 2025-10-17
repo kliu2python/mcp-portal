@@ -30,7 +30,8 @@ from ..services.task_registry import (
     update_task_metadata,
 )
 from ..services.test_runs import append_run_log_entry, log_manual_run, update_manual_run
-from ..utils.json import dump_list
+from ..services.vector_memory import append_memory_to_text, fetch_relevant_memory
+from ..utils.json import dump_list, load_string_list
 
 
 class ManagedTask:
@@ -42,8 +43,10 @@ class ManagedTask:
         task_text: str,
         prompt_template: Optional[str],
         llm_settings: Optional[Dict[str, str]],
+        base_task_text: Optional[str] = None,
     ) -> None:
         self.task_text = task_text
+        self.base_task_text = base_task_text or task_text
         self.prompt_template = prompt_template
         self.llm_settings = llm_settings
         self.queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -210,6 +213,29 @@ async def run_task(request: TaskRequest) -> StreamingResponse:
     prompt_template: Optional[str] = None
     llm_settings: Optional[Dict[str, str]] = None
 
+    base_task_text = task_text
+    memory_matches = []
+
+    async with AsyncSessionLocal() as session:
+        query_text = base_task_text
+        tag_source: list[str] = []
+        if request.test_case_id is not None:
+            linked_case = await session.get(TestCase, request.test_case_id)
+            if linked_case is not None:
+                tags = load_string_list(linked_case.tags)
+                tag_source = tags
+                description = linked_case.description or ""
+                query_parts = [linked_case.title, description, " ".join(tags)]
+                query_text = " \n".join(part for part in query_parts if part)
+        memory_matches = await fetch_relevant_memory(
+            session,
+            query_text=query_text,
+            tags=tag_source,
+            limit=3,
+        )
+
+    task_text = append_memory_to_text(task_text, memory_matches)
+
     async with AsyncSessionLocal() as session:
         if request.prompt_id is not None:
             prompt_template = (await get_prompt_template(session, request.prompt_id)).template
@@ -225,7 +251,10 @@ async def run_task(request: TaskRequest) -> StreamingResponse:
             }
 
     managed_task = ManagedTask(
-        task_text=task_text, prompt_template=prompt_template, llm_settings=llm_settings
+        task_text=task_text,
+        prompt_template=prompt_template,
+        llm_settings=llm_settings,
+        base_task_text=base_task_text,
     )
 
     async with _tasks_lock:
@@ -242,14 +271,14 @@ async def run_task(request: TaskRequest) -> StreamingResponse:
 
             if test_case is None:
                 generated_reference = f"DRAFT-{uuid.uuid4().hex[:6].upper()}"
-                title_source = task_text.splitlines()[0].strip() if task_text.splitlines() else ""
+                title_source = base_task_text.splitlines()[0].strip() if base_task_text.splitlines() else ""
                 title = title_source[:120] if title_source else generated_reference
                 tags = dump_list(["manual"])
-                steps = dump_list([line.strip() for line in task_text.splitlines() if line.strip()])
+                steps = dump_list([line.strip() for line in base_task_text.splitlines() if line.strip()])
                 test_case = TestCase(
                     reference=generated_reference,
                     title=title,
-                    description=task_text,
+                    description=base_task_text,
                     category="Manual",
                     priority="Medium",
                     status="Draft",
