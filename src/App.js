@@ -7,8 +7,8 @@ import QualityInsightsTab from './components/QualityInsightsTab';
 import TestCaseModal from './components/TestCaseModal';
 import TestCasesTab from './components/TestCasesTab';
 import { formatDate, formatDuration } from './utils/format';
-import API_BASE_URL from './config';
-import SupportChatWidget from './components/SupportChatWidget';
+
+const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:8000';
 
 const tabs = [
   { id: 'testCases', label: 'MCP Task Hub', icon: ClipboardList },
@@ -1099,7 +1099,6 @@ function App() {
         statuses={statuses}
         isEditing={Boolean(editingTestCaseId)}
       />
-      <SupportChatWidget />
     </div>
   );
 }
