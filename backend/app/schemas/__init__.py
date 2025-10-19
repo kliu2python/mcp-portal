@@ -5,6 +5,12 @@ from .prompt import (
     PromptTemplateRead,
     PromptTemplateUpdate,
 )
+from .support_chat import (
+    SupportChatMessage,
+    SupportChatMessageRequest,
+    SupportChatMessageResponse,
+    SupportChatSessionResponse,
+)
 from .task import TaskRequest
 from .test_case import TestCaseCreate, TestCaseRead, TestCaseUpdate
 from .test_run import (
@@ -26,6 +32,10 @@ __all__ = [
     "PromptTemplateCreate",
     "PromptTemplateRead",
     "PromptTemplateUpdate",
+    "SupportChatMessage",
+    "SupportChatMessageRequest",
+    "SupportChatMessageResponse",
+    "SupportChatSessionResponse",
     "TaskRequest",
     "TestCaseCreate",
     "TestCaseRead",
