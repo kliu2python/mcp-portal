@@ -8,6 +8,10 @@ from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from mcp_use import MCPAgent, MCPClient
 
+from .patches import apply_mcp_use_patches
+
+apply_mcp_use_patches()
+
 from .config import build_mcp_config
 from .events import (
     prepare_stream_event,
